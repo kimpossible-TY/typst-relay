@@ -59,3 +59,5 @@ The benchmark book's complete file hash manifest remained unchanged after testin
 ## Remaining scope
 
 Expression-stage dynamic fallbacks remain available. This patch specifically removes eager runtime tracing from dependency pre-discovery. Long-running memory stability, edit/cancel scheduling, remote preview reliability, and actual editor rollout remain later validation/development steps. The active editor has not been switched to this candidate.
+
+Subsequent update: the first patch was committed and uploaded to a private repository, and the active editor server was switched to the candidate with semantic tokens enabled. See [deployment record](deployment.md) for verification and rollback details. Long-running and remote-preview validation remains outstanding.

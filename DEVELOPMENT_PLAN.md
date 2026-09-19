@@ -58,3 +58,9 @@
 분석 테스트 74개, CLI/LSP 통합 테스트 9개, 검증 도구 테스트 5개와 query crate의 엄격한 clippy가 통과했다. 의존성까지 포함한 clippy는 변경하지 않은 macOS 코드의 기존 unsafe 주석 오류로 실패했으며 상세 기록에 남겼다.
 
 수정 바이너리는 `target/release/tinymist`와 `.local/candidate/tinymist`에 있다. 현재 편집기 연결 전환과 원격 프리뷰 실사용 검증은 아직 하지 않았다. [세부 검증 결과](openspec/changes/static-import-discovery/validation.md)를 참고한다.
+
+## 첫 패치 보존 및 실제 환경 적용 — 2026-09-19
+
+첫 패치를 `288b215d`로 커밋하고 비공개 저장소 `kimpossible-TY/tinymist-private`에 업로드했다. 실제 원격 VS Code의 Tinymist 서버를 검증된 수정 바이너리로 전환했으며, 의미 색상을 다시 활성화한 설정 적용까지 서버 로그로 확인했다. 위 1차 개발 시점의 미적용 상태는 이 배포로 갱신되었다. 장시간 편집과 원격 프리뷰 실사용 검증은 다음 단계로 남는다.
+
+[배포 내역과 원복 방법](openspec/changes/static-import-discovery/deployment.md)에 설치 위치, 체크섬, 원본 백업을 기록했다.
