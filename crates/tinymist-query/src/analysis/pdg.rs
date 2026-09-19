@@ -350,19 +350,18 @@ impl SharedContext {
                 site.span()
             );
 
-            // Reuse the normal const/type-backed import evaluator. It first
-            // handles direct constants and then falls back to the existing
-            // runtime import tracer; this pass does not maintain a second
-            // lexical evaluator.
-            let (source_value, module_value) = self.analyze_import(site);
-            let mut resolved = false;
-            for value in source_value.into_iter().chain(module_value) {
-                resolved |= add_value(self, fid, value, &mut dependencies);
-            }
+            // Discovery visits even uncalled function bodies. Runtime tracing
+            // here would compile the whole document just to discover an edge,
+            // before expression analysis can resolve the import statically.
+            // Leave non-constant sources to that scope-aware pass, which records
+            // authoritative late edges through the component coordinator.
+            let resolved = site
+                .cast::<ast::Expr>()
+                .and_then(Self::const_eval)
+                .is_some_and(|value| add_value(self, fid, value, &mut dependencies));
 
-            // A traced result is only an observation for a non-literal site.
-            // Keep dynamic sites eligible for an authoritative late edge from
-            // the full expression pass.
+            // Keep unresolved sites eligible for late edges. This also prevents
+            // reusing a previous revision's results with incomplete dependencies.
             let exact_literal = site
                 .cast::<ast::Expr>()
                 .is_some_and(|expr| matches!(expr, ast::Expr::Str(_)));
@@ -774,15 +773,202 @@ impl CoordinatorState {
 
 #[cfg(test)]
 mod tests {
+    use tinymist_analysis::stats::GLOBAL_STATS;
     use typst::syntax::{RootedPath, VirtualPath, VirtualRoot};
 
     use super::*;
+    use crate::{
+        SemanticTokensFullRequest,
+        syntax::Expr,
+        tests::{run_with_ctx, run_with_sources},
+        ty::Ty,
+    };
 
     fn file(name: &str) -> FileId {
         FileId::new(RootedPath::new(
             VirtualRoot::Project,
             VirtualPath::new(name).expect("test path must be valid"),
         ))
+    }
+
+    fn trace_count(fid: FileId) -> u64 {
+        let file = format!("{fid:?}").replace('\\', "/");
+        GLOBAL_STATS
+            .report_json()
+            .into_iter()
+            .filter(|entry| entry.file.as_deref() == Some(file.as_str()))
+            .filter(|entry| entry.query == "analyze_expr")
+            .map(|entry| entry.count)
+            .sum()
+    }
+
+    #[test]
+    fn discovery_keeps_literal_imports_and_includes_in_uncalled_bodies() {
+        run_with_sources(
+            r#"
+/// path: pdg-static-module.typ
+#let visible = 1
+-----
+/// path: pdg-static-include.typ
+Included content.
+-----
+/// path: pdg-static-unused.typ
+#let hidden = 2
+-----
+/// path: pdg-static-discovery.typ
+#import "pdg-static-module.typ": visible
+#include "pdg-static-include.typ"
+#let unused() = { import "pdg-static-unused.typ": hidden }
+"#,
+            |verse, path| {
+                run_with_ctx(verse, path, &|ctx, path| {
+                    let source = ctx.source_by_path(&path).unwrap();
+                    let before = trace_count(source.id());
+                    let discovery = ctx.shared().discover_dependencies(source.id());
+
+                    assert!(!discovery.has_unresolved);
+                    assert_eq!(discovery.dependencies.len(), 3);
+                    for name in [
+                        "pdg-static-module.typ",
+                        "pdg-static-include.typ",
+                        "pdg-static-unused.typ",
+                    ] {
+                        let target = ctx.source_by_path(&path.with_file_name(name)).unwrap();
+                        assert!(discovery.dependencies.contains(&target.id()));
+                    }
+                    assert_eq!(trace_count(source.id()), before);
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn discovery_defers_nonliteral_sources_without_tracing() {
+        run_with_sources(
+            r#"
+/// path: pdg-unresolved-discovery.typ
+#let choose() = "pdg-unresolved-target.typ"
+#let unused() = {
+  import calc: max
+  import choose(): *
+  include choose()
+}
+"#,
+            |verse, path| {
+                run_with_ctx(verse, path, &|ctx, path| {
+                    assert!(!typst_shim::is_syntax_only());
+                    let source = ctx.source_by_path(&path).unwrap();
+                    let before = trace_count(source.id());
+                    let discovery = ctx.shared().discover_dependencies(source.id());
+
+                    assert!(discovery.dependencies.is_empty());
+                    assert!(discovery.has_unresolved);
+                    assert_eq!(trace_count(source.id()), before);
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn unused_builtin_import_preserves_semantic_tokens_without_tracing() {
+        run_with_sources(
+            r#"
+/// path: pdg-unused-builtin-tokens.typ
+#let unused() = { import calc: max; max }
+"#,
+            |verse, path| {
+                run_with_ctx(verse, path, &|ctx, path| {
+                    assert!(!typst_shim::is_syntax_only());
+                    let source = ctx.source_by_path(&path).unwrap();
+                    let before = trace_count(source.id());
+                    let tokens = SemanticTokensFullRequest::compute(ctx, &source);
+                    let expressions = ctx.shared().expr_stage(&source);
+
+                    assert!(!tokens.is_empty());
+                    assert!(expressions.resolves.values().any(|resolved| {
+                        resolved.decl.name().as_ref() == "max"
+                            && matches!(
+                                &resolved.term,
+                                Some(Ty::Value(value)) if matches!(&value.val, Value::Func(_))
+                            )
+                    }));
+                    assert_eq!(trace_count(source.id()), before);
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn parameter_shadowing_does_not_resolve_the_builtin_module() {
+        run_with_sources(
+            r#"
+/// path: pdg-shadowed-builtin-tokens.typ
+#let unused(calc) = { import calc: max; max }
+"#,
+            |verse, path| {
+                run_with_ctx(verse, path, &|ctx, path| {
+                    assert!(!typst_shim::is_syntax_only());
+                    let source = ctx.source_by_path(&path).unwrap();
+                    let before = trace_count(source.id());
+                    let discovery = ctx.shared().discover_dependencies(source.id());
+                    assert!(discovery.dependencies.is_empty());
+                    assert!(discovery.has_unresolved);
+
+                    let tokens = SemanticTokensFullRequest::compute(ctx, &source);
+                    let expressions = ctx.shared().expr_stage(&source);
+                    assert!(!tokens.is_empty());
+                    let imported = expressions
+                        .resolves
+                        .values()
+                        .filter(|resolved| resolved.decl.name().as_ref() == "max")
+                        .collect::<Vec<_>>();
+                    assert!(!imported.is_empty());
+                    assert!(imported.iter().all(|resolved| resolved.term.is_none()));
+                    assert_eq!(trace_count(source.id()), before);
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn module_aliases_retain_exports_after_static_discovery() {
+        run_with_sources(
+            r#"
+/// path: pdg-alias-module.typ
+#let marker() = 1
+-----
+/// path: pdg-alias-tokens.typ
+#import "pdg-alias-module.typ" as calc
+#import calc as alias
+#let unused() = { import alias: marker; marker }
+"#,
+            |verse, path| {
+                run_with_ctx(verse, path, &|ctx, path| {
+                    assert!(!typst_shim::is_syntax_only());
+                    let source = ctx.source_by_path(&path).unwrap();
+                    let module = ctx
+                        .source_by_path(&path.with_file_name("pdg-alias-module.typ"))
+                        .unwrap();
+                    let before = trace_count(source.id());
+                    let discovery = ctx.shared().discover_dependencies(source.id());
+                    assert_eq!(discovery.dependencies, vec![module.id()]);
+                    assert!(discovery.has_unresolved);
+
+                    let tokens = SemanticTokensFullRequest::compute(ctx, &source);
+                    let expressions = ctx.shared().expr_stage(&source);
+                    assert!(!tokens.is_empty());
+                    assert!(expressions.imports.contains_key(&module.id()));
+                    assert!(expressions.resolves.values().any(|resolved| {
+                        resolved.decl.name().as_ref() == "marker"
+                            && matches!(
+                                &resolved.root,
+                                Some(Expr::Decl(decl)) if decl.file_id() == Some(module.id())
+                            )
+                    }));
+                    assert_eq!(trace_count(source.id()), before);
+                });
+            },
+        );
     }
 
     #[test]
