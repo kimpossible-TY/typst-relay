@@ -49,19 +49,42 @@ The first patch passed 74 query tests, 9 CLI/LSP end-to-end tests, and 5 harness
 
 ## Get started
 
-Use the existing Tinymist VS Code extension. No separate extension or VSIX is required. The initial deployment used extension version 0.15.8; compatibility with later versions has not been established.
+**Keep your existing Tinymist extension installed and enabled.** Flow supplies the server that it launches. It will not appear as another extension in the Extensions panel, and you do not need to build or install a VSIX.
 
-Build on the machine where the extension host runs. Install Rust through rustup; this checkout pins its toolchain.
+The initial deployment used Tinymist extension 0.15.8 on macOS arm64. Compatibility with newer extension versions and other platforms has not yet been established.
+
+### 1. Choose where the server will run
+
+| **VS Code setup** | **Install/enable Tinymist in** | **Build Flow and use a path on** |
+| --- | --- | --- |
+| Local folder | Local VS Code | Your local computer |
+| Remote SSH or Tunnel | The connected remote environment | The remote machine |
+| Dev Container or WSL | The container or WSL environment | That container or WSL environment |
+
+For a remote session, open a terminal in the connected VS Code window and perform the build there. A path on your laptop cannot identify a server binary on a different host. Build for the host’s operating system and CPU architecture; a macOS executable cannot run on a Linux host.
+
+### 2. Build the server
+
+Install Rust through rustup and the native build tools for your operating system. This checkout pins its Rust toolchain. In a terminal on the server host:
 
 ```bash
 git clone https://github.com/kimpossible-TY/tinymist-flow.git
 cd tinymist-flow
 cargo build --locked --release --bin tinymist
+./target/release/tinymist probe
 ```
 
-For a machine with limited memory, use `CARGO_BUILD_JOBS=2` before the build command. The executable remains named `tinymist`.
+The commands above use a macOS/Linux shell. A successful `probe` exits with status 0; it does not need to print a success message. On Windows the executable is `target/release/tinymist.exe`.
 
-Set these values in the appropriate VS Code workspace or remote settings, using your actual absolute path:
+While the repository is private, cloning requires an account with access and authenticated Git credentials. You can alternatively clone with an authenticated GitHub CLI using `gh repo clone kimpossible-TY/tinymist-flow`.
+
+For a machine with limited memory, use `CARGO_BUILD_JOBS=2 cargo build --locked --release --bin tinymist` in a macOS/Linux shell. The first build can take time; these build times are unrelated to document editing latency.
+
+### 3. Tell the existing extension to use Flow
+
+Open the **Typst document project** in VS Code. Open the Command Palette with **Cmd+Shift+P** on macOS or **Ctrl+Shift+P** on Windows/Linux, then run **Preferences: Open Workspace Settings (JSON)**.
+
+For a normal single-folder project, this edits `.vscode/settings.json`. Merge the following entries into the existing JSON object; keep your existing root, entry-file, preview, and other settings:
 
 ```json
 {
@@ -70,7 +93,42 @@ Set these values in the appropriate VS Code workspace or remote settings, using 
 }
 ```
 
-Run **Developer: Reload Window** so the extension picks up the executable path, then reopen the preview. For SSH or tunnel sessions, the path must exist on the extension-host machine. To return to the bundled server, remove the `tinymist.serverPath` override and reload the window.
+Replace the example path with the actual executable path. On macOS/Linux, run `pwd` in the cloned repository and append `/target/release/tinymist`. Use a full absolute path instead of `~`, environment variables, or workspace-variable placeholders. On Windows, an example JSON value is `"C:/dev/tinymist-flow/target/release/tinymist.exe"`.
+
+If you want all local projects to use Flow, use **Preferences: Open User Settings (JSON)** instead. For all projects on a remote host, use **Preferences: Open Remote Settings (JSON)** in the connected window. Workspace settings can override those choices. Host-specific absolute paths are usually best kept in your personal or remote settings when sharing a project with other people. See [VS Code’s settings guide](https://code.visualstudio.com/docs/configure/settings).
+
+### 4. Reload and open your preview
+
+Save your files and settings, then run **Developer: Reload Window** from the Command Palette. Open a `.typ` file and use your usual Tinymist preview command or preview button.
+
+Use a window reload after changing `serverPath`: the extension caches the resolved executable path, so restarting only the language server may reuse the previous path. Once connected, semantic colors, hover, completion, and preview remain available through the familiar Tinymist extension UI.
+
+The extension starts Flow itself. You do not need to run a separate `tinymist lsp` command or change preview port-forwarding settings just to select this server. Existing remote preview networking still needs to work independently.
+
+### 5. Check that the switch worked
+
+- Open **View → Output** and select **Tinymist Typst**. Check that server startup succeeds without a “Could not find a valid tinymist binary” error.
+- Confirm that your effective `tinymist.serverPath` points to the Flow executable, and that `tinymist.semanticTokens` is `"enable"`.
+- For a stronger check on macOS/Linux, run `pgrep -fl tinymist` on the extension host. Identify the language-server process launched with your configured path and `lsp`; other open VS Code windows may have their own servers.
+- Edit, hover, and reopen the preview in your document. This checks the editor experience; it does not by itself establish a performance benchmark.
+
+The first patch retains upstream version metadata. Seeing `0.15.8` in `--version` is expected and does not distinguish Flow from upstream. Use the selected executable path and, when needed, its checksum to identify your build.
+
+### Troubleshooting
+
+| **Symptom** | **What to check** |
+| --- | --- |
+| No “Tinymist Flow” extension appears | Expected: keep using the existing Tinymist extension. Flow replaces its server. |
+| “Could not find a valid tinymist binary” | Check the absolute path, executable permissions, host OS/architecture, and run that executable with `probe` on the extension host. |
+| The old server still seems active | Check workspace overrides and run Developer: Reload Window after changing the path. |
+| Meaning-based colors are missing | Keep `tinymist.semanticTokens` enabled. Check whether VS Code or the active theme disables semantic highlighting; if needed, set `editor.semanticHighlighting.enabled` to `true`. |
+| Remote preview still fails | Inspect Tinymist output and the existing remote connection/port forwarding. This analysis patch is not a general networking fix. |
+
+### Updating and returning to upstream
+
+To update Flow, fetch the desired revision, rebuild with the same release command, and reload the VS Code window. If the executable cannot be replaced while running, close the windows using it first, then build and reopen them. Updating the Marketplace extension does not update your custom server binary, and compatibility with a new extension version should be checked before relying on it.
+
+To return to the bundled server, remove `tinymist.serverPath` from whichever settings scopes define it, then run **Developer: Reload Window**. Semantic tokens may remain enabled. If you previously replaced the extension’s bundled executable manually, also restore its original backup or reinstall the extension; removing the setting alone cannot undo that replacement.
 
 ## Reproduce the regression
 
