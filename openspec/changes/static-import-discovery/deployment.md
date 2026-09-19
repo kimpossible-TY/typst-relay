@@ -4,7 +4,7 @@ Date: 2026-09-19 (Asia/Seoul).
 
 ## Source preservation
 
-- Private independent repository: https://github.com/kimpossible-TY/tinymist-private
+- Private independent repository: https://github.com/kimpossible-TY/tinymist-flow
 - Patch commit: `288b215d190b3dad69dd951cb391da6402a852d1`.
 - Branch: `perf/static-import-discovery`.
 - Preservation tag: `fork-v0.15.8-p1`.

@@ -1,4 +1,6 @@
 //! Coordinates expression and type analysis at import-component granularity.
+//!
+//! Modified by Tinymist Flow: static-only dependency discovery and regression tests.
 
 use std::{
     collections::VecDeque,

@@ -17,3 +17,7 @@ editors/lapce/out/
 refs/
 .playwright-mcp/
 .gradle
+
+# Modified by Tinymist Flow: keep local experiments and deployment records private.
+/.local/
+/.worktrees/

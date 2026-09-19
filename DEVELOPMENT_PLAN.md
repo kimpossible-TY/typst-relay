@@ -6,7 +6,7 @@
 
 큰 수학 문서, CeTZ/Fletcher 및 로컬 패키지를 사용하는 편집에서 의미 색상을 유지하면서 분석 지연, 불필요한 컴파일, 요청 누적을 줄인다. 문서의 컴파일 의미는 유지한다.
 
-- Private development repository: https://github.com/kimpossible-TY/tinymist-private
+- Private development repository: https://github.com/kimpossible-TY/tinymist-flow
 - Initial public fork (not used for private development pushes): https://github.com/kimpossible-TY/tinymist
 - Upstream: https://github.com/Myriad-Dreamin/tinymist
 - 최초 개발 기준: 0.15.8 실행 파일의 소스 커밋 `32f908199ee17ea295512bbc27166e890c438175`.
@@ -61,6 +61,6 @@
 
 ## 첫 패치 보존 및 실제 환경 적용 — 2026-09-19
 
-첫 패치를 `288b215d`로 커밋하고 비공개 저장소 `kimpossible-TY/tinymist-private`에 업로드했다. 실제 원격 VS Code의 Tinymist 서버를 검증된 수정 바이너리로 전환했으며, 의미 색상을 다시 활성화한 설정 적용까지 서버 로그로 확인했다. 위 1차 개발 시점의 미적용 상태는 이 배포로 갱신되었다. 장시간 편집과 원격 프리뷰 실사용 검증은 다음 단계로 남는다.
+첫 패치를 `288b215d`로 커밋하고 비공개 저장소 `kimpossible-TY/tinymist-flow`에 업로드했다. 실제 원격 VS Code의 Tinymist 서버를 검증된 수정 바이너리로 전환했으며, 의미 색상을 다시 활성화한 설정 적용까지 서버 로그로 확인했다. 위 1차 개발 시점의 미적용 상태는 이 배포로 갱신되었다. 장시간 편집과 원격 프리뷰 실사용 검증은 다음 단계로 남는다.
 
 [배포 내역과 원복 방법](openspec/changes/static-import-discovery/deployment.md)에 설치 위치, 체크섬, 원본 백업을 기록했다.

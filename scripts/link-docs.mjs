@@ -1,11 +1,13 @@
 import { resolve, basename, relative } from "path";
 import * as fs from "fs";
 import * as util from "util";
-import { execSync } from "child_process";
+// Modified by Tinymist Flow: dedicated fork README source and focused generation.
+import { execSync, execFileSync } from "child_process";
 const exec = util.promisify(execSync);
 
 const root = resolve(import.meta.dirname, "..");
 const dry = process.argv.includes("--dry");
+const readmeOnly = process.argv.includes("--readme-only");
 
 const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
 
@@ -37,6 +39,14 @@ const yarn = (cmd, stdio = "inherit") => {
   return execSync(script, { stdio });
 };
 const typlite = (input, output) => {
+  if (readmeOnly && !dry) {
+    return execFileSync(resolve(root, "target/debug/typlite"), [
+      "--input", `tinymist-git-head=${gitHead}`,
+      "--input", `tinymist-git-head-branch=${gitHeadBranch}`,
+      "--input", `tinymist-git-head-hash=${gitHeadHash}`,
+      "--root", root, input, "-",
+    ], { cwd: root, encoding: "utf-8" });
+  }
   const assets_flag = dry
     ? ""
     : `--assets-path ${relative(root, resolve(output, "../assets/images/", basename(input.slice(0, -4))))}`;
@@ -163,7 +173,7 @@ const maintainerMd = async () => {
 
 const tasks = [
   {
-    input: "docs/tinymist/introduction.typ",
+    input: "docs/tinymist/flow.typ",
     output: "README.md",
   },
   {
@@ -217,6 +227,10 @@ const tasks = [
 ];
 
 const main = async () => {
+  if (readmeOnly) {
+    await convert(tasks[0]);
+    return;
+  }
   prepareGeneratedInputs();
   await Promise.all([...tasks.map(convert), maintainerMd()]);
 };
