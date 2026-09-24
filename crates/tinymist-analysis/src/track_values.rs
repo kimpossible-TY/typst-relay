@@ -62,6 +62,57 @@ pub fn analyze_expr_(world: &dyn World, node: &SyntaxNode) -> EcoVec<(Value, Opt
     eco_vec![(val, None)]
 }
 
+/// Determines the first value observed for an expression.
+///
+/// Evaluation observations precede layout observations in [`typst::trace`]. If
+/// evaluation already observes a value, consumers that only use the first one
+/// can skip layout entirely without losing runtime fields or changing which
+/// value they select. Contextual expressions still require the full trace.
+pub fn analyze_expr_first_(
+    world: &dyn World,
+    node: &SyntaxNode,
+) -> Option<(Value, Option<Styles>)> {
+    let expr = node.cast::<ast::Expr>()?;
+    if matches!(
+        expr,
+        ast::Expr::None(_)
+            | ast::Expr::Auto(_)
+            | ast::Expr::Bool(_)
+            | ast::Expr::Int(_)
+            | ast::Expr::Float(_)
+            | ast::Expr::Numeric(_)
+            | ast::Expr::Str(_)
+    ) || is_syntax_only()
+    {
+        return analyze_expr_(world, node).into_iter().next();
+    }
+
+    if node.kind() == SyntaxKind::Contextual
+        && let Some(child) = node.children().last()
+    {
+        return analyze_expr_first_(world, child);
+    }
+
+    let first = {
+        let _guard = GLOBAL_STATS.stat(node.span().id(), "analyze_expr_eval");
+        let main = world.source(world.main()).ok()?;
+        let traced = Traced::new(node.span());
+        let mut sink = Sink::new();
+        // Retain observations even when later evaluation fails, matching trace.
+        let _ = typst_shim::eval::eval(
+            world.track(),
+            world.library(),
+            traced.track(),
+            sink.track_mut(),
+            Route::default().track(),
+            &main,
+        );
+        sink.values().into_iter().next()
+    };
+
+    first.or_else(|| analyze_expr_(world, node).into_iter().next())
+}
+
 /// Try to load a module from the current source file.
 #[typst_macros::time(span = source.span())]
 pub fn analyze_import_(world: &dyn World, source: &SyntaxNode) -> (Option<Value>, Option<Value>) {

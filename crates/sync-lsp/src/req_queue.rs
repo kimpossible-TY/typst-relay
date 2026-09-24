@@ -72,6 +72,11 @@ impl<I> Incoming<I> {
         self.pending.insert(id, data);
     }
 
+    /// Returns mutable data for a request that is still pending.
+    pub fn get_mut(&mut self, id: &RequestId) -> Option<&mut I> {
+        self.pending.get_mut(id)
+    }
+
     /// Returns an iterator over the pending requests.
     pub fn pending(&self) -> impl Iterator<Item = (&RequestId, &I)> {
         self.pending.iter()

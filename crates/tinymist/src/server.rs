@@ -94,6 +94,9 @@ pub struct ServerState {
     /// Source synchronized with client
     pub memory_changes: HashMap<Arc<Path>, Source>,
 
+    /// Admission and snapshot invalidation for semantic requests.
+    pub(crate) query_queue: crate::query_queue::QueryQueue,
+
     /// The diagnostics sender to send diagnostics to `crate::actor::cluster`.
     pub editor_tx: mpsc::UnboundedSender<EditorRequest>,
     /// The editor actor state
@@ -167,6 +170,7 @@ impl ServerState {
             project: handle,
             editor_tx,
             memory_changes: HashMap::new(),
+            query_queue: Default::default(),
             ever_focusing_by_activities: false,
             ever_manual_focusing: false,
             sema_tokens_registered: false,
@@ -275,7 +279,6 @@ impl ServerState {
             .with_resource("/dir/package", State::resource_package_dirs)
             .with_resource("/dir/package/local", State::resource_local_package_dir);
 
-        // todo: .on_sync_mut::<notifs::Cancel>(handlers::handle_cancel)?
         let mut provider = provider
             .with_request::<Shutdown>(State::shutdown)
             // customized event
@@ -417,6 +420,7 @@ impl ServerState {
             return Ok(());
         };
 
+        ready.query_queue.invalidate_for_interrupt(&params);
         ready.project.interrupt(params);
 
         ready.schedule_async();

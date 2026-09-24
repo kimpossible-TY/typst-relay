@@ -708,7 +708,12 @@ impl CompileHandler<LspCompilerFeat, ProjectInsStateExt> for CompileHandlerImpl 
             });
         }
 
-        self.editor_tx.send(EditorRequest::Status(rep)).unwrap();
+        // A compilation can finish after the editor actor has shut down.
+        // Dropping its status must not turn a Rayon worker panic into a
+        // process-wide abort.
+        self.editor_tx
+            .send(EditorRequest::Status(rep))
+            .log_error("failed to send compile status");
     }
 
     fn notify_removed(&self, id: &ProjectInsId) {

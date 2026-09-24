@@ -16,7 +16,7 @@ use std::sync::atomic::AtomicI32;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Weak};
 
-use futures::future::MaybeDone;
+use futures::future::{AbortHandle, AbortRegistration, Abortable, MaybeDone};
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::{Value as JsonValue, from_value};
@@ -260,7 +260,16 @@ impl LspClientRoot {
 }
 
 type ReqHandler = Box<dyn for<'a> FnOnce(&'a mut dyn Any, LspOrDapResponse) + Send + Sync>;
-type ReqQueue = req_queue::ReqQueue<(String, Time), ReqHandler>;
+#[derive(Debug)]
+pub(crate) struct PendingRequest {
+    method: String,
+    received_at: Time,
+    identity: Arc<()>,
+    abort: AbortHandle,
+    registration: Option<AbortRegistration>,
+}
+
+type ReqQueue = req_queue::ReqQueue<PendingRequest, ReqHandler>;
 
 /// Different transport mechanisms for communication.
 #[derive(Debug, Clone)]
@@ -503,12 +512,60 @@ impl LspClient {
     pub fn register_request(&self, method: &str, id: &RequestId, received_at: Time) {
         let mut req_queue = self.req_queue.lock();
         self.hook.start_request(id, method);
-        req_queue
-            .incoming
-            .register(id.clone(), (method.to_owned(), received_at));
+        let (abort, registration) = AbortHandle::new_pair();
+        req_queue.incoming.register(
+            id.clone(),
+            PendingRequest {
+                method: method.to_owned(),
+                received_at,
+                identity: Arc::new(()),
+                abort,
+                registration: Some(registration),
+            },
+        );
     }
 
-    fn respond_result(&self, id: RequestId, result: LspResult<JsonValue>) {
+    /// Cancels a pending read-only query and sends its only terminal response.
+    ///
+    /// Dropping the response future also drops queued work. Synchronous work
+    /// that has already started must finish safely; its eventual result is
+    /// ignored because the request is no longer pending.
+    ///
+    /// Lifecycle, execute-command, and unknown extension requests are not
+    /// cancellation-safe by default: their synchronous handlers can change
+    /// state before returning a future that must finish initialization or
+    /// cleanup. Ignore cancellation for those until they explicitly support it.
+    #[cfg(feature = "lsp")]
+    pub fn cancel_request(&self, id: RequestId) {
+        let pending = self
+            .req_queue
+            .lock()
+            .incoming
+            .get_mut(&id)
+            .filter(|r| {
+                r.method.starts_with("textDocument/")
+                    || matches!(
+                        r.method.as_str(),
+                        "workspace/symbol" | "workspace/willRenameFiles"
+                    )
+            })
+            .map(|r| (r.abort.clone(), r.identity.clone()));
+        let Some((abort, identity)) = pending else {
+            return;
+        };
+        abort.abort();
+        self.respond_result(
+            id,
+            &identity,
+            Err(ResponseError {
+                code: ErrorCode::RequestCanceled as i32,
+                message: "cancelled by client".into(),
+                data: None,
+            }),
+        );
+    }
+
+    fn respond_result(&self, id: RequestId, identity: &Arc<()>, result: LspResult<JsonValue>) {
         let req_id = id.clone();
         let msg: Message = match (self.msg_kind, result) {
             #[cfg(feature = "lsp")]
@@ -521,13 +578,29 @@ impl LspClient {
             }
         };
 
-        self.respond(req_id, msg);
+        self.respond_if_current(req_id, msg, Some(identity));
     }
 
     /// Completes an client2server request in the request queue.
     pub fn respond(&self, id: RequestId, response: Message) {
+        self.respond_if_current(id, response, None);
+    }
+
+    fn respond_if_current(&self, id: RequestId, response: Message, identity: Option<&Arc<()>>) {
         let mut req_queue = self.req_queue.lock();
-        let Some((method, received_at)) = req_queue.incoming.complete(&id) else {
+        if let Some(identity) = identity {
+            let current = req_queue.incoming.get_mut(&id);
+            if !current.is_some_and(|request| Arc::ptr_eq(&request.identity, identity)) {
+                return;
+            }
+        }
+        let Some(PendingRequest {
+            method,
+            received_at,
+            abort,
+            ..
+        }) = req_queue.incoming.complete(&id)
+        else {
             return;
         };
 
@@ -537,10 +610,14 @@ impl LspClient {
         match delay {
             Ok(delay) => {
                 if delay.as_secs() > 10 {
-                    let worst_outgoing =
-                        req_queue.incoming.pending().max_by_key(|(_, data)| data.1);
-                    let worst_case = if let Some((id, (method, since))) = worst_outgoing {
-                        let duration = tinymist_std::time::now().duration_since(*since);
+                    let worst_outgoing = req_queue
+                        .incoming
+                        .pending()
+                        .max_by_key(|(_, data)| data.received_at);
+                    let worst_case = if let Some((id, pending)) = worst_outgoing {
+                        let method = &pending.method;
+                        let duration =
+                            tinymist_std::time::now().duration_since(pending.received_at);
                         format!(", worst case: req({method:?}, {id:?}) - {duration:?}")
                     } else {
                         String::new()
@@ -565,6 +642,11 @@ impl LspClient {
             response => response,
         };
 
+        drop(req_queue);
+        // A direct response can complete a request whose scheduled future is
+        // still waiting. Wake it after releasing the queue lock, on every
+        // protocol including DAP.
+        abort.abort();
         self.sender.send_message(response);
     }
 }
@@ -572,20 +654,250 @@ impl LspClient {
 impl LspClient {
     /// Finally sends the response if it is not sent before.
     /// From the definition, the response is already sent if it is `Some(())`.
-    pub async fn schedule_tail(self, req_id: RequestId, resp: ScheduleResult) {
-        match resp {
-            Ok(MaybeDone::Done(result)) => {
-                self.respond_result(req_id, result);
+    pub fn schedule_tail(
+        self,
+        req_id: RequestId,
+        resp: ScheduleResult,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        // Capture the registration before dispatch, not when the future first
+        // polls: the client may cancel and then reuse this ID in the meantime.
+        let pending = self
+            .req_queue
+            .lock()
+            .incoming
+            .get_mut(&req_id)
+            .map(|request| (request.identity.clone(), request.registration.take()));
+        async move {
+            let Some((identity, registration)) = pending else {
+                return;
+            };
+            match resp {
+                Ok(MaybeDone::Done(result)) => {
+                    self.respond_result(req_id, &identity, result);
+                }
+                Ok(MaybeDone::Future(result)) => {
+                    if let Some(registration) = registration
+                        && let Ok(result) = Abortable::new(result, registration).await
+                    {
+                        self.respond_result(req_id, &identity, result);
+                    }
+                }
+                Ok(MaybeDone::Gone) => {
+                    log::debug!("response for request({req_id:?}) was already sent");
+                }
+                Err(err) => {
+                    self.respond_result(req_id, &identity, Err(err));
+                }
             }
-            Ok(MaybeDone::Future(result)) => {
-                self.respond_result(req_id, result.await);
-            }
-            Ok(MaybeDone::Gone) => {
-                log::debug!("response for request({req_id:?}) was already sent");
-            }
-            Err(err) => {
-                self.respond_result(req_id, Err(err));
-            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "lsp", feature = "system"))]
+mod cancellation_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn cancelled_requests_respond_once_and_never_start() {
+        for id in [
+            RequestId::from(7),
+            RequestId::from("request-seven".to_owned()),
+        ] {
+            let connection = Connection::<LspMessage>::channel();
+            let root = LspClientRoot::new(tokio::runtime::Handle::current(), connection.sender);
+            let client = root.weak();
+            let started = Arc::new(AtomicBool::new(false));
+            let observed = started.clone();
+            client.register_request("textDocument/completion", &id, tinymist_std::time::now());
+            let response = just_future(async move {
+                observed.store(true, Ordering::Release);
+                Ok(JsonValue::Null)
+            });
+            client.cancel_request(id.clone());
+            client.cancel_request(id.clone());
+            client.clone().schedule_tail(id.clone(), response).await;
+            let Message::Lsp(lsp::Message::Response(response)) =
+                connection.receiver.lsp.try_recv().unwrap()
+            else {
+                panic!("expected cancellation response");
+            };
+            assert_eq!(response.id, id);
+            assert_eq!(
+                response.error.unwrap().code,
+                ErrorCode::RequestCanceled as i32
+            );
+            assert!(!started.load(Ordering::Acquire));
+            assert!(!client.has_pending_requests());
+            assert!(connection.receiver.lsp.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_drops_a_waiting_future() {
+        let connection = Connection::<LspMessage>::channel();
+        let root = LspClientRoot::new(tokio::runtime::Handle::current(), connection.sender);
+        let client = root.weak();
+        let id = RequestId::from(1);
+        client.register_request("textDocument/hover", &id, tinymist_std::time::now());
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (retained, released) = tokio::sync::oneshot::channel::<()>();
+        let response = just_future(async move {
+            let _retained = retained;
+            started.send(()).unwrap();
+            futures::future::pending::<LspResult<JsonValue>>().await
+        });
+        let task = tokio::spawn(client.clone().schedule_tail(id.clone(), response));
+        ready.await.unwrap();
+        client.cancel_request(id);
+        task.await.unwrap();
+        assert!(released.await.is_err());
+        assert!(!client.has_pending_requests());
+        assert!(connection.receiver.lsp.try_recv().is_ok());
+        assert!(connection.receiver.lsp.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn late_and_unknown_cancellation_are_ignored() {
+        let connection = Connection::<LspMessage>::channel();
+        let root = LspClientRoot::new(tokio::runtime::Handle::current(), connection.sender);
+        let client = root.weak();
+        let id = RequestId::from(1);
+        client.register_request("test", &id, tinymist_std::time::now());
+        client
+            .clone()
+            .schedule_tail(id.clone(), just_ok(JsonValue::Null))
+            .await;
+        client.cancel_request(id);
+        client.cancel_request(RequestId::from(999));
+        let Message::Lsp(lsp::Message::Response(response)) =
+            connection.receiver.lsp.try_recv().unwrap()
+        else {
+            panic!("expected successful response");
+        };
+        assert!(response.error.is_none());
+        assert!(connection.receiver.lsp.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_future_cannot_take_a_reused_ids_registration() {
+        for id in [RequestId::from(7), RequestId::from("reused".to_owned())] {
+            let connection = Connection::<LspMessage>::channel();
+            let root = LspClientRoot::new(tokio::runtime::Handle::current(), connection.sender);
+            let client = root.weak();
+            let started = Arc::new(AtomicBool::new(false));
+            let observed = started.clone();
+
+            client.register_request("textDocument/completion", &id, tinymist_std::time::now());
+            let old = client.clone().schedule_tail(
+                id.clone(),
+                just_future(async move {
+                    observed.store(true, Ordering::Release);
+                    Ok(JsonValue::String("old".into()))
+                }),
+            );
+            // The old future has not been polled when cancellation completes.
+            client.cancel_request(id.clone());
+            assert!(connection.receiver.lsp.try_recv().is_ok());
+
+            client.register_request("textDocument/hover", &id, tinymist_std::time::now());
+            let new = client.clone().schedule_tail(
+                id.clone(),
+                just_future(async { Ok(JsonValue::String("new".into())) }),
+            );
+            old.await;
+            assert!(!started.load(Ordering::Acquire));
+            assert!(client.has_pending_requests());
+            assert!(connection.receiver.lsp.try_recv().is_err());
+
+            new.await;
+            let Message::Lsp(lsp::Message::Response(response)) =
+                connection.receiver.lsp.try_recv().unwrap()
+            else {
+                panic!("expected the new request's response");
+            };
+            assert_eq!(response.id, id);
+            assert_eq!(response.result, Some(JsonValue::String("new".into())));
+            assert!(!client.has_pending_requests());
+            assert!(connection.receiver.lsp.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_ready_response_cannot_complete_a_reused_id() {
+        let connection = Connection::<LspMessage>::channel();
+        let root = LspClientRoot::new(tokio::runtime::Handle::current(), connection.sender);
+        let client = root.weak();
+        let id = RequestId::from(1);
+        client.register_request("textDocument/completion", &id, tinymist_std::time::now());
+        let old = client
+            .clone()
+            .schedule_tail(id.clone(), just_ok(JsonValue::String("old".into())));
+        client.cancel_request(id.clone());
+        assert!(connection.receiver.lsp.try_recv().is_ok());
+
+        client.register_request("textDocument/hover", &id, tinymist_std::time::now());
+        old.await;
+        assert!(client.has_pending_requests());
+        assert!(connection.receiver.lsp.try_recv().is_err());
+
+        client
+            .clone()
+            .schedule_tail(id, just_ok(JsonValue::String("new".into())))
+            .await;
+        let Message::Lsp(lsp::Message::Response(response)) =
+            connection.receiver.lsp.try_recv().unwrap()
+        else {
+            panic!("expected the new request's response");
+        };
+        assert_eq!(response.result, Some(JsonValue::String("new".into())));
+        assert!(!client.has_pending_requests());
+        assert!(connection.receiver.lsp.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stateful_requests_finish_before_responding_despite_cancellation() {
+        for method in [
+            "workspace/executeCommand",
+            "initialize",
+            "shutdown",
+            "tinymist/customStateful",
+        ] {
+            let connection = Connection::<LspMessage>::channel();
+            let root = LspClientRoot::new(tokio::runtime::Handle::current(), connection.sender);
+            let client = root.weak();
+            let id = RequestId::from(1);
+            let finished = Arc::new(AtomicBool::new(false));
+            let observed = finished.clone();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let (release, wait) = tokio::sync::oneshot::channel();
+
+            client.register_request(method, &id, tinymist_std::time::now());
+            let response = just_future(async move {
+                started.send(()).unwrap();
+                wait.await.unwrap();
+                observed.store(true, Ordering::Release);
+                Ok(JsonValue::Null)
+            });
+            let task = tokio::spawn(client.clone().schedule_tail(id.clone(), response));
+            ready.await.unwrap();
+            client.cancel_request(id.clone());
+            assert!(client.has_pending_requests());
+            assert!(connection.receiver.lsp.try_recv().is_err());
+            assert!(!finished.load(Ordering::Acquire));
+
+            release.send(()).unwrap();
+            task.await.unwrap();
+            assert!(finished.load(Ordering::Acquire));
+            let Message::Lsp(lsp::Message::Response(response)) =
+                connection.receiver.lsp.try_recv().unwrap()
+            else {
+                panic!("expected the completed stateful request's response");
+            };
+            assert_eq!(response.id, id);
+            assert!(response.error.is_none());
+            assert!(!client.has_pending_requests());
+            assert!(connection.receiver.lsp.try_recv().is_err());
         }
     }
 }

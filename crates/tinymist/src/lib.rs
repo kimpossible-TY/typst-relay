@@ -52,6 +52,7 @@ mod input;
 #[path = "log.rs"]
 mod log_;
 mod lsp;
+mod query_queue;
 mod resource;
 mod server;
 mod stats;

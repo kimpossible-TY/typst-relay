@@ -826,6 +826,9 @@ fn exclude_from_time_machine(path: &Path) {
     let is_excluded_key: Result<string::CFString, _> = "NSURLIsExcludedFromBackupKey".parse();
     let path = url::CFURL::from_path(path, false);
     if let (Some(path), Ok(is_excluded_key)) = (path, is_excluded_key) {
+        // SAFETY: The owned URL and key keep their Core Foundation references
+        // alive for this call. kCFBooleanTrue is a valid static CFBoolean, and
+        // the optional error output may be null when errors are ignored.
         unsafe {
             url::CFURLSetResourcePropertyForKey(
                 path.as_concrete_TypeRef(),

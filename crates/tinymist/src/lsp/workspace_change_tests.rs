@@ -17,7 +17,7 @@ use typst::ecow::EcoString;
 
 use crate::actor::editor::{EditorRequest, ProjVersion};
 use crate::input::{FileChange, FileChangeResult, FsChangeParams};
-use crate::project::{Interrupt, LspInterrupt, ProjectInsId};
+use crate::project::{EntryReader, Interrupt, LspInterrupt, ProjectInsId};
 use crate::{CompileFontArgs, Config, ConstConfig, ServerState};
 
 const MAIN: &str = "main.typ";
@@ -219,6 +219,140 @@ struct DiagnosticPublication {
     diagnostics: Option<tinymist_query::DiagnosticsMap>,
 }
 
+fn assert_queued_query_after_pin_update(
+    harness: &mut LspHarness,
+    invalidate: bool,
+    update: impl FnOnce(&mut ServerState),
+) {
+    let queue = harness.server.query_queue.clone();
+    let revision = queue.revision();
+    let entry = harness.server.project.compiler.primary.verse.entry_state();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let blocker = harness.runtime.spawn(queue.clone().run(revision, move || {
+        started.send(()).unwrap();
+        // Dropping the sender also releases the worker if an assertion fails.
+        let _ = wait.recv();
+        Ok(())
+    }));
+    harness.runtime.block_on(ready).unwrap();
+
+    // Capture a real language-query snapshot for another file while admission
+    // is occupied. Pin mode decides whether its world uses that file or MAIN.
+    let response = harness.server.goto_definition(GotoDefinitionParams {
+        text_document_position_params: harness.text_position(OTHER_DEP, 1, 2),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    });
+    let MaybeDone::Future(future) = response.unwrap() else {
+        panic!("expected queued semantic analysis");
+    };
+    let pending = harness.runtime.spawn(future);
+    update(&mut harness.server);
+    assert_eq!(
+        harness.server.project.compiler.primary.verse.entry_state(),
+        entry
+    );
+
+    if invalidate {
+        assert_ne!(queue.revision(), revision);
+        let error = harness.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(1), pending)
+                .await
+                .expect("obsolete snapshot should drop before the running query finishes")
+                .unwrap()
+                .unwrap_err()
+        });
+        assert_eq!(error.code, sync_ls::ErrorCode::ContentModified as i32);
+        drop(release);
+    } else {
+        assert_eq!(queue.revision(), revision);
+        assert!(!pending.is_finished());
+        drop(release);
+        harness.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(1), pending)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        });
+    }
+    harness.runtime.block_on(blocker).unwrap().unwrap();
+}
+
+#[test]
+fn pin_mode_changes_reject_queued_snapshots_with_the_same_entry() {
+    for preview in [false, true] {
+        for pin in [false, true] {
+            let mut harness = LspHarness::new(&[
+                (MAIN, "#let main = 1\n#main"),
+                (OTHER_DEP, "#let other = 2\n#other"),
+            ]);
+            let main: ImmutPath = harness.path(MAIN).as_path().into();
+            harness.server.config.entry_resolver.entry = None;
+            harness.server.config.has_default_entry_path = false;
+            harness.server.focusing = Some(main.clone());
+            harness
+                .server
+                .pin_main_file((!preview && !pin).then(|| main.clone()))
+                .unwrap();
+            harness.server.set_pin_by_preview(preview && !pin, false);
+            assert_eq!(harness.server.is_pinning(), !pin);
+
+            assert_queued_query_after_pin_update(&mut harness, true, |server| {
+                if preview {
+                    server.set_pin_by_preview(pin, false);
+                } else {
+                    server.pin_main_file(pin.then_some(main)).unwrap();
+                }
+                assert_eq!(server.is_pinning(), pin);
+            });
+        }
+    }
+}
+
+#[test]
+fn unchanged_effective_pin_mode_preserves_queued_snapshots() {
+    let mut harness = LspHarness::new(&[
+        (MAIN, "#let main = 1\n#main"),
+        (OTHER_DEP, "#let other = 2\n#other"),
+    ]);
+    let main: ImmutPath = harness.path(MAIN).as_path().into();
+    harness.server.set_pin_by_preview(true, false);
+    assert_queued_query_after_pin_update(&mut harness, false, |server| {
+        server.pin_main_file(Some(main.clone())).unwrap();
+        server.pin_main_file(None).unwrap(); // The preview still pins MAIN.
+        server.set_pin_by_preview(true, true);
+        server.pin_main_file(Some(main)).unwrap();
+        server.set_pin_by_preview(false, false); // The user still pins MAIN.
+        assert!(server.is_pinning());
+    });
+}
+
+#[test]
+fn late_compile_status_after_editor_shutdown_does_not_panic() {
+    use tinymist_project::{CompileReport, CompileStatusEnum};
+
+    let mut harness = LspHarness::new(&[(MAIN, "content")]);
+    let handler = harness.server.project.compiler.primary.handler.clone();
+    let revision = harness.server.project.compiler.primary.verse.revision.get() + 1;
+    harness.editor_rx.close();
+
+    std::thread::spawn(move || {
+        handler.status(
+            revision,
+            CompileReport {
+                id: ProjectInsId::PRIMARY,
+                compiling_id: None,
+                page_count: 1,
+                status: CompileStatusEnum::Compiling,
+            },
+        );
+    })
+    .join()
+    .expect("a late compilation must tolerate a closed editor receiver");
+}
+
 impl LspHarness {
     fn new(files: &[(&str, &str)]) -> Self {
         let root = tempfile::tempdir().expect("failed to create temp workspace");
@@ -258,6 +392,16 @@ impl LspHarness {
             editor_rx,
             last_diag_revision: 0,
         };
+        // These fixtures exercise workspace state, not the public package
+        // registry. Keep completion prefetch deterministic and offline.
+        harness
+            .server
+            .project
+            .compiler
+            .primary
+            .verse
+            .registry
+            .test_package_list(Vec::new);
         harness
             .server
             .pin_main_file(Some(harness.path(MAIN).as_path().into()))

@@ -29,6 +29,7 @@ impl ServerState {
     /// Updates a set of source files.
     fn update_sources(&mut self, files: FileChangeSet) -> Result<()> {
         log::trace!("update source: {files:?}");
+        self.query_queue.invalidate();
 
         let intr = Interrupt::Memory(MemoryEvent::Update(files.clone()));
         self.project.interrupt(intr);
@@ -99,6 +100,7 @@ impl ServerState {
 
     /// Saves a source file.
     pub fn save_source(&mut self, path: ImmutPath) -> Result<()> {
+        self.query_queue.invalidate();
         // FIXME: this is a workaround for the issue of notify, which does not fully
         // emit fs changes.
         //
@@ -155,6 +157,7 @@ impl ServerState {
 
         let update = FilesystemEvent::Update(FileChangeSet { inserts, removes }, params.is_sync);
         log::info!("fs_change: {update:?}");
+        self.query_queue.invalidate();
         self.project.interrupt(Interrupt::Fs(update));
 
         self.schedule_async();
@@ -167,8 +170,12 @@ impl ServerState {
 impl ServerState {
     /// Updates the `pinning_by_preview` status.
     pub fn set_pin_by_preview(&mut self, pin: bool, browsing: bool) {
+        let was_pinning = self.is_pinning();
         self.pinning_by_preview = pin;
         self.pinning_by_browsing_preview = browsing;
+        if self.is_pinning() != was_pinning {
+            self.query_queue.invalidate();
+        }
     }
 
     /// Changes main file to the given path.
@@ -186,6 +193,14 @@ impl ServerState {
 
         let task = self.resolve_task_or(path);
 
+        if task
+            .entry
+            .as_ref()
+            .is_some_and(|entry| *entry != self.project.compiler.primary.verse.entry_state())
+        {
+            self.query_queue.invalidate();
+        }
+
         log::info!("the task of the primary is changing to {task:?}");
 
         let id = self.project.primary_id().clone();
@@ -196,7 +211,11 @@ impl ServerState {
 
     /// Pins the main file to the given path
     pub fn pin_main_file(&mut self, new_entry: Option<ImmutPath>) -> Result<()> {
+        let was_pinning = self.is_pinning();
         self.pinning_by_user = new_entry.is_some();
+        if self.is_pinning() != was_pinning {
+            self.query_queue.invalidate();
+        }
         let entry = new_entry
             .or_else(|| self.entry_resolver().resolve_default())
             .or_else(|| self.focusing.clone());

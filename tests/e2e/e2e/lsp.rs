@@ -1,7 +1,10 @@
 use std::{
-    collections::HashSet,
-    io,
+    collections::{HashMap, HashSet},
+    io::{self, Read},
     path::{Path, PathBuf},
+    process::{Child, Stdio},
+    sync::mpsc,
+    time::{Duration, Instant},
 };
 
 use serde_json::{json, Value};
@@ -33,7 +36,7 @@ fn test_lsp() {
         });
 
         let hash = replay_log(&root.join("vscode"));
-        insta::assert_snapshot!(hash, @"siphash128_13:20190eede2c69def771599513a0f3f08");
+        insta::assert_snapshot!(hash, @"siphash128_13:d105f02f35a3753d08ddd1ed2c6ac803");
     }
 
     {
@@ -44,7 +47,7 @@ fn test_lsp() {
         });
 
         let hash = replay_log(&root.join("vscode-syntax-only"));
-        insta::assert_snapshot!(hash, @"siphash128_13:fc145d62fa6a84c7f05d8f02688a158a");
+        insta::assert_snapshot!(hash, @"siphash128_13:d8e330d273d6c3784d142f545a5f7053");
     }
 }
 
@@ -69,9 +72,126 @@ fn find_char_boundary(s: &str, i: usize) -> usize {
     panic!("char boundary not found");
 }
 
-fn exec_output<'a>(args: impl IntoIterator<Item = &'a str>) -> Vec<u8> {
-    let output = handle_io(cli().args(args).output());
-    let err = output.stderr;
+struct ReplayProcess(Child);
+
+impl Drop for ReplayProcess {
+    fn drop(&mut self) {
+        // A failed assertion or response timeout must not leave a server running.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn replay_output(log_file: &Path) -> Vec<lsp::Message> {
+    let recorded = messages(handle_io(std::fs::read(log_file)));
+    let mut recorded_replies = HashMap::new();
+    let mut inputs = Vec::new();
+    for message in recorded {
+        if let lsp::Message::Response(response) = message {
+            recorded_replies.insert(response.id.clone(), response);
+        } else {
+            inputs.push(message);
+        }
+    }
+
+    let mut child = ReplayProcess(handle_io(
+        cli()
+            .arg("lsp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn(),
+    ));
+    let mut stdin = child.0.stdin.take().unwrap();
+    let mut stdout = io::BufReader::new(child.0.stdout.take().unwrap());
+    let mut stderr = child.0.stderr.take().unwrap();
+    let (send, receive) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        while let Some(message) = handle_io(lsp::Message::read(&mut stdout)) {
+            if send.send(message).is_err() {
+                break;
+            }
+        }
+    });
+    let errors = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        handle_io(stderr.read_to_end(&mut bytes));
+        bytes
+    });
+    let mut output = Vec::new();
+    let mut transient_errors = Vec::new();
+    for message in inputs {
+        let request = match &message {
+            lsp::Message::Request(request) => Some(request.clone()),
+            _ => None,
+        };
+        handle_io(message.write(&mut stdin));
+        let Some(request) = request else {
+            continue;
+        };
+        // Raw --replay floods edits without their original timing. Obsolete
+        // queued analyses then legitimately return ContentModified depending on
+        // worker scheduling. This content snapshot test finishes each request
+        // before the next recorded operation. Delayed filesystem updates can
+        // still invalidate a snapshot, so retry that specific error with the
+        // same parameters, at most five times. Keep those responses separately;
+        // cancellation and overlapping edits are tested elsewhere.
+        let mut retries = 0;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .expect("server did not finish the recorded request");
+            let message = receive
+                .recv_timeout(remaining)
+                .expect("server did not finish the recorded request");
+            match &message {
+                lsp::Message::Response(response) => {
+                    assert_eq!(response.id, request.id, "unexpected response: {response:?}");
+                    if response.error.as_ref().is_some_and(|error| {
+                        error.code == sync_ls::ErrorCode::ContentModified as i32
+                    }) {
+                        retries += 1;
+                        assert!(retries <= 5, "snapshot never stabilized: {request:?}");
+                        transient_errors.push(message);
+                        handle_io(lsp::Message::Request(request.clone()).write(&mut stdin));
+                        continue;
+                    }
+                    output.push(message);
+                    break;
+                }
+                lsp::Message::Request(server_request) => {
+                    // A recorded client reply may occur later in the file. Send
+                    // it as soon as requested so a response barrier cannot
+                    // deadlock a server request awaiting that reply.
+                    if let Some(reply) = recorded_replies.remove(&server_request.id) {
+                        handle_io(lsp::Message::Response(reply).write(&mut stdin));
+                    }
+                }
+                lsp::Message::Notification(_) => {}
+            }
+            output.push(message);
+        }
+    }
+    handle_io(std::fs::write(
+        log_file.with_file_name("transient_errors.json"),
+        serde_json::to_vec_pretty(&transient_errors).unwrap(),
+    ));
+    drop(stdin);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = handle_io(child.0.try_wait()) {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "replay server did not exit after EOF"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    reader.join().unwrap();
+    output.extend(receive);
+    let err = errors.join().unwrap();
     // if contains panic
     let err = std::str::from_utf8(&err).unwrap();
     let panic = err.find("panic");
@@ -89,7 +209,8 @@ fn exec_output<'a>(args: impl IntoIterator<Item = &'a str>) -> Vec<u8> {
         );
     }
 
-    output.stdout
+    assert!(status.success(), "replay server failed: {status}\n{err}");
+    output
 }
 
 struct ReplayBuilder {
@@ -349,8 +470,7 @@ fn gen_smoke(args: SmokeArgs) {
 }
 
 fn replay_log(root: &Path) -> String {
-    let log_file = root.join("mirror.log").to_str().unwrap().to_owned();
-    let mut res = messages(exec_output(["lsp", "--replay", &log_file]));
+    let mut res = replay_output(&root.join("mirror.log"));
     // retain not notification
     res.retain(|msg| matches!(msg, lsp::Message::Response(_)));
     // sort by id
@@ -359,10 +479,31 @@ fn replay_log(root: &Path) -> String {
         lsp::Message::Response(res) => res.id.clone(),
         lsp::Message::Notification(_) => RequestId::from(0),
     });
-    // print to result.log
+    // Preserve the original responses separately from snapshot normalization.
+    let raw = serde_json::to_string_pretty(&res).unwrap();
+    std::fs::write(root.join("result.json"), raw).unwrap();
+    // Token result IDs are opaque cache handles. A ContentModified retry can
+    // consume an ID without changing the returned token data. Normalize handles
+    // by first appearance, preserving repeated-handle relationships.
+    let mut token_results = HashMap::new();
+    for message in &mut res {
+        let lsp::Message::Response(response) = message else {
+            continue;
+        };
+        let Some(id) = response
+            .result
+            .as_mut()
+            .and_then(|result| result.get_mut("resultId"))
+        else {
+            continue;
+        };
+        let next = (token_results.len() + 1).to_string();
+        let normalized = token_results
+            .entry(id.as_str().unwrap().to_owned())
+            .or_insert(next);
+        *id = json!(normalized);
+    }
     let res = serde_json::to_value(&res).unwrap();
-    let c = serde_json::to_string_pretty(&res).unwrap();
-    std::fs::write(root.join("result.json"), c).unwrap();
     // let sorted_res
     let sorted_res = sort_and_redact_value(res);
     let c = serde_json::to_string_pretty(&sorted_res).unwrap();

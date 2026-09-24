@@ -1360,6 +1360,12 @@ impl SharedContext {
         token.enter(|| analyze_expr_(self.world(), source))
     }
 
+    /// Gets the first observed value, avoiding layout when evaluation suffices.
+    pub fn analyze_expr_first(&self, source: &SyntaxNode) -> Option<(Value, Option<Styles>)> {
+        let token = &self.analysis.workers.expression;
+        token.enter(|| tinymist_analysis::analyze_expr_first_(self.world(), source))
+    }
+
     /// Get bib info of a source file.
     pub fn analyze_bib(&self, introspector: &dyn Introspector) -> Option<Arc<BibInfo>> {
         let world = self.world();

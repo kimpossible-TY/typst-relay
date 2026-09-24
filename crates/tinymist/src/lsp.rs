@@ -148,6 +148,7 @@ impl ServerState {
             }
         }
 
+        self.query_queue.invalidate();
         self.config.configure_syntax_only();
 
         #[cfg(feature = "export")]

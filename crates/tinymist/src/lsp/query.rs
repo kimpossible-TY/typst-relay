@@ -227,6 +227,16 @@ impl ServerState {
 
         just_ok(match query {
             FoldingRange(req) => query_source!(self, FoldingRange, req)?,
+            DocumentHighlight(req) if self.memory_changes.contains_key(req.path.as_path()) => {
+                // Highlighting only inspects syntax. Keep opened documents out
+                // of semantic admission while preserving disk-source fallback.
+                let encoding = self.const_config().position_encoding;
+                self.query_source(req.path.clone().into(), |source| {
+                    Ok(CompilerQueryResponse::DocumentHighlight(
+                        req.request_source(&source, encoding),
+                    ))
+                })?
+            }
             SelectionRange(req) => query_source!(self, SelectionRange, req)?,
             DocumentSymbol(req) => query_source!(self, DocumentSymbol, req)?,
             OnEnter(req) => query_source!(self, OnEnter, req)?,
@@ -271,16 +281,18 @@ impl ServerState {
             }
         }
 
-        just_future(async move {
+        let queue = self.query_queue.clone();
+        let revision = queue.revision();
+        just_future(queue.run(revision, move || {
             stat.snap();
 
             // todo: preload in web
             #[cfg(feature = "system")]
             if matches!(query, Completion(..)) {
                 // Prefetch the package index for completion.
-                if snap.registry().cached_index().is_none() {
+                if snap.registry().try_claim_index_prefetch() {
                     let registry = snap.registry().clone();
-                    tokio::spawn(async move {
+                    tokio::task::spawn_blocking(move || {
                         let _ = registry.download_index();
                     });
                 }
@@ -312,7 +324,7 @@ impl ServerState {
             };
 
             res.map_err(internal_error)
-        })
+        }))
     }
 }
 

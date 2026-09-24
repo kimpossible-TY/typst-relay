@@ -573,7 +573,9 @@ impl ExprWorker<'_> {
             typed.imports().is_none().then(|| {
                 let name = match mod_expr.as_ref()? {
                     Expr::Decl(decl) if matches!(decl.as_ref(), Decl::Module { .. }) => {
-                        decl.name().clone()
+                        // A field import binds the final field name, even if
+                        // that module was exported under an alias.
+                        typed.bare_name().ok()?.into()
                     }
                     _ => return None,
                 };
@@ -824,11 +826,19 @@ impl ExprWorker<'_> {
                 let seg = Interned::new(Decl::ident_ref(seg));
                 path.push(seg);
             }
-            // todo: import path
-            let (mut root, val) = match path.last().map(|decl| decl.name()) {
+            let (mut root, mut val) = match path.first().map(|decl| decl.name()) {
                 Some(name) => scope.get(name),
                 None => (None, None),
             };
+            for seg in path.iter().skip(1) {
+                let selected = self
+                    .fold_expr_and_val((root, val))
+                    .and_then(|lhs| self.syntax_level_select(lhs, seg, seg.span()));
+                (root, val) = match selected {
+                    Some(Expr::Type(ty)) => (None, Some(ty)),
+                    expr => (expr, None),
+                };
+            }
 
             crate::log_debug_ct!("path {path:?} -> {root:?} {val:?}");
             if root.is_none() && val.is_none() {
@@ -1369,28 +1379,41 @@ impl ExprWorker<'_> {
     }
 
     fn fold_expr(&mut self, expr: Option<Expr>) -> Option<Expr> {
+        self.fold_expr_inner(expr?, &mut Vec::new())
+    }
+
+    fn fold_expr_inner(&mut self, expr: Expr, visiting: &mut Vec<Expr>) -> Option<Expr> {
         crate::log_debug_ct!("folding cc: {expr:?}");
-        match expr {
-            Some(Expr::Decl(decl)) if !decl.is_def() => {
+        // Re-exported modules are references themselves. Resolve them before
+        // selecting another field, while rejecting recursive alias chains.
+        if visiting.contains(&expr) {
+            return None;
+        }
+        visiting.push(expr.clone());
+        let result = (|| match &expr {
+            Expr::Decl(decl) if !decl.is_def() => {
                 crate::log_debug_ct!("folding decl: {decl:?}");
                 let (x, y) = self.eval_ident(decl.name(), InterpretMode::Code);
-                self.fold_expr_and_val((x, y))
+                self.fold_expr_inner(x.or_else(|| y.map(Expr::Type))?, visiting)
             }
-            Some(Expr::Ref(r)) => {
+            Expr::Ref(r) => {
                 crate::log_debug_ct!("folding ref: {r:?}");
-                self.fold_expr_and_val((r.root.clone(), r.term.clone()))
+                let root = r.root.clone().or_else(|| r.term.clone().map(Expr::Type))?;
+                self.fold_expr_inner(root, visiting)
             }
-            Some(Expr::Select(r)) => {
-                let lhs = self.fold_expr(Some(r.lhs.clone()));
+            Expr::Select(r) => {
+                let lhs = self.fold_expr_inner(r.lhs.clone(), visiting)?;
                 crate::log_debug_ct!("folding select: {r:?} ([{lhs:?}].[{:?}])", r.key);
-                self.syntax_level_select(lhs?, &r.key, r.span)
+                let selected = self.syntax_level_select(lhs, &r.key, r.span)?;
+                self.fold_expr_inner(selected, visiting)
             }
-            Some(expr) => {
+            _ => {
                 crate::log_debug_ct!("folding expr: {expr:?}");
-                Some(expr)
+                Some(expr.clone())
             }
-            _ => None,
-        }
+        })();
+        visiting.pop();
+        result
     }
 
     fn syntax_level_select(&mut self, lhs: Expr, key: &Interned<Decl>, span: Span) -> Option<Expr> {
@@ -1412,6 +1435,11 @@ impl ExprWorker<'_> {
                 }
                 _ => None,
             },
+            Expr::Type(Ty::Value(value)) => value
+                .val
+                .field(key.name(), ())
+                .ok()
+                .map(|value| Expr::Type(Ty::Value(InsTy::new(value)))),
             _ => None,
         }
     }
@@ -1453,9 +1481,177 @@ fn none_expr() -> Expr {
 
 #[cfg(test)]
 mod tests {
+    use tinymist_analysis::stats::GLOBAL_STATS;
+
+    use super::*;
+    use crate::{
+        SemanticTokensFullRequest,
+        tests::{run_with_ctx, run_with_sources},
+    };
+
+    fn trace_count(fid: TypstFileId) -> u64 {
+        let file = format!("{fid:?}").replace('\\', "/");
+        GLOBAL_STATS
+            .report_json()
+            .into_iter()
+            .filter(|entry| entry.file.as_deref() == Some(file.as_str()))
+            .filter(|entry| entry.query == "analyze_expr")
+            .map(|entry| entry.count)
+            .sum()
+    }
+
+    #[test]
+    fn nested_module_imports_resolve_statically_without_tracing() {
+        for (name, import, binding) in [
+            ("bare", "#import deps.branch.leaf", "leaf"),
+            ("item", "#import deps.branch.leaf: marker", "marker"),
+            ("wildcard", "#import deps.branch.leaf: *", "marker"),
+            ("nested-item", "#import deps.branch: leaf.marker", "marker"),
+            (
+                "renamed",
+                "#import deps.branch.leaf as selected: marker as renamed",
+                "renamed",
+            ),
+        ] {
+            let sources = format!(
+                r#"
+/// path: field-import-{name}-leaf.typ
+#let marker() = 1
+-----
+/// path: field-import-{name}-branch.typ
+#import "field-import-{name}-leaf.typ" as leaf
+#let marker() = 2
+-----
+/// path: field-import-{name}-root.typ
+#import "field-import-{name}-branch.typ" as branch
+-----
+/// path: field-import-{name}-main.typ
+#import "field-import-{name}-root.typ" as deps
+{import}
+"#
+            );
+            run_with_sources(&sources, |verse, path| {
+                run_with_ctx(verse, path, &|ctx, path| {
+                    assert!(!typst_shim::is_syntax_only());
+                    let source = ctx.source_by_path(&path).unwrap();
+                    let target = ctx
+                        .source_by_path(
+                            &path.with_file_name(format!("field-import-{name}-leaf.typ")),
+                        )
+                        .unwrap();
+                    let before = trace_count(source.id());
+                    assert!(!SemanticTokensFullRequest::compute(ctx, &source).is_empty());
+                    let expressions = ctx.shared().expr_stage(&source);
+                    let imported = expressions.exports.get(&binding.into()).unwrap_or_else(|| {
+                        panic!("missing {binding} for {name}: {:?}", expressions.exports)
+                    });
+                    // Wildcard imports expose the original declaration; named
+                    // imports keep a reference for the local binding.
+                    let root = match imported {
+                        Expr::Ref(imported) => imported.root.as_ref(),
+                        expr => Some(expr),
+                    };
+                    let Some(Expr::Decl(decl)) = root else {
+                        panic!(
+                            "expected the resolved definition for {name}/{binding}: {imported:?}"
+                        );
+                    };
+                    assert_eq!(decl.file_id(), Some(target.id()));
+                    assert_eq!(trace_count(source.id()), before);
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn non_module_field_import_does_not_resolve_items_or_trace() {
+        run_with_sources(
+            r#"
+/// path: field-import-non-module-deps.typ
+#let ordinary-function() = 1
+-----
+/// path: field-import-non-module-main.typ
+#import "field-import-non-module-deps.typ" as deps
+#import deps.ordinary-function: absent
+"#,
+            |verse, path| {
+                run_with_ctx(verse, path, &|ctx, path| {
+                    let source = ctx.source_by_path(&path).unwrap();
+                    let before = trace_count(source.id());
+                    let expressions = ctx.shared().expr_stage(&source);
+                    let Expr::Ref(imported) = expressions.exports.get(&"absent".into()).unwrap()
+                    else {
+                        panic!("expected an unresolved import reference");
+                    };
+                    assert!(imported.term.is_none());
+                    assert!(!matches!(imported.root, Some(Expr::Decl(_))));
+                    assert_eq!(trace_count(source.id()), before);
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn static_folding_stops_recursive_aliases() {
+        struct NoExports;
+        impl ExportLookup for NoExports {
+            fn exports_of(
+                &mut self,
+                _: &Arc<SharedContext>,
+                _: TypstFileId,
+                _: &Source,
+            ) -> Option<Arc<LazyHash<LexicalScope>>> {
+                panic!("alias folding must not load module exports")
+            }
+        }
+
+        run_with_sources(
+            "/// path: field-import-alias-cycle.typ\n#first #second",
+            |verse, path| {
+                run_with_ctx(verse, path, &|ctx, path| {
+                    let source = ctx.source_by_path(&path).unwrap();
+                    let aliases = source
+                        .root()
+                        .children()
+                        .filter_map(|node| node.cast::<ast::Ident>())
+                        .map(|ident| Interned::new(Decl::ident_ref(ident)))
+                        .collect::<Vec<_>>();
+                    assert_eq!(aliases.len(), 2);
+                    let mut lookup = NoExports;
+                    let mut worker = ExprWorker {
+                        fid: source.id(),
+                        source: source.clone(),
+                        ctx: ctx.shared_(),
+                        imports: Default::default(),
+                        import_buffer: Default::default(),
+                        docstrings: Default::default(),
+                        exprs: Default::default(),
+                        resolves: Default::default(),
+                        buffer: Default::default(),
+                        lexical: Default::default(),
+                        module_items: Default::default(),
+                        init_stage: false,
+                        lookup: &mut lookup,
+                        comment_matcher: Default::default(),
+                    };
+                    worker
+                        .scope_mut()
+                        .insert_mut(aliases[0].name().clone(), Expr::Decl(aliases[1].clone()));
+                    worker
+                        .scope_mut()
+                        .insert_mut(aliases[1].name().clone(), Expr::Decl(aliases[0].clone()));
+                    assert!(
+                        worker
+                            .fold_expr(Some(Expr::Decl(aliases[0].clone())))
+                            .is_none()
+                    );
+                });
+            },
+        );
+    }
+
     #[test]
     fn test_expr_size() {
-        use super::*;
         assert!(size_of::<Expr>() <= size_of::<usize>() * 2);
     }
 }

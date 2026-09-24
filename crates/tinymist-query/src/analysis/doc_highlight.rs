@@ -5,8 +5,8 @@ use crate::{prelude::*, syntax::node_ancestors};
 /// Analyzes the document and provides related expression information to
 /// highlight.
 pub struct DocumentHighlightWorker<'a> {
-    /// The local analysis context to work with.
-    ctx: &'a mut LocalContext,
+    /// The client's source position encoding.
+    position_encoding: PositionEncoding,
     /// The source document to analyze.
     source: &'a Source,
     /// The related expressions to provide.
@@ -18,8 +18,13 @@ pub struct DocumentHighlightWorker<'a> {
 impl<'a> DocumentHighlightWorker<'a> {
     /// Creates a new worker
     pub fn new(ctx: &'a mut LocalContext, source: &'a Source) -> Self {
+        Self::from_source(source, ctx.position_encoding())
+    }
+
+    /// Creates a worker that only needs the synchronized source and its encoding.
+    pub fn from_source(source: &'a Source, position_encoding: PositionEncoding) -> Self {
         Self {
-            ctx,
+            position_encoding,
             source,
             annotated: Vec::new(),
             worklist: Vec::new(),
@@ -48,8 +53,6 @@ impl<'a> DocumentHighlightWorker<'a> {
     }
 
     fn work_loop(&mut self, node: &'a LinkedNode<'a>) -> Option<()> {
-        let _ = self.ctx;
-
         // find the nearest loop node
         let loop_node = 'find_loop: {
             for anc in node_ancestors(node) {
@@ -90,7 +93,7 @@ impl<'a> DocumentHighlightWorker<'a> {
         }
 
         self.annotated.push(DocumentHighlight {
-            range: self.ctx.to_lsp_range(rng, self.source),
+            range: to_lsp_range(rng, self.source, self.position_encoding),
             kind: None,
         });
     }

@@ -1,6 +1,8 @@
 //! Http registry for tinymist.
 
+use std::io::{BufReader, Read};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
@@ -128,6 +130,8 @@ pub struct PackageStorage {
     cert_path: Option<ImmutPath>,
     /// The cached index of the preview namespace.
     index: OnceLock<Vec<PackageIndexEntry>>,
+    /// Whether one caller has reserved the background index download.
+    index_prefetch_claimed: AtomicBool,
     notifier: Arc<Mutex<dyn Notifier + Send>>,
 }
 
@@ -147,6 +151,7 @@ impl PackageStorage {
             cert_path,
             notifier,
             index: OnceLock::new(),
+            index_prefetch_claimed: AtomicBool::new(false),
         }
     }
 
@@ -226,6 +231,22 @@ impl PackageStorage {
         self.index.get().map(Vec::as_slice)
     }
 
+    /// Reserves the one background index prefetch for this storage.
+    ///
+    /// Returns false if the index is cached or another caller already reserved
+    /// it. A successful caller must schedule [`Self::download_index`]. Claim
+    /// before scheduling so concurrent requests do not each occupy a blocking
+    /// worker waiting for the same index. The claim is permanent, consistent
+    /// with `download_index` caching both success and an empty error fallback.
+    /// Direct calls to `download_index` remain available independently.
+    pub fn try_claim_index_prefetch(&self) -> bool {
+        self.cached_index().is_none()
+            && self
+                .index_prefetch_claimed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
+
     /// Download the package index. The result of this is cached for efficiency.
     pub fn download_index(&self) -> &[PackageIndexEntry] {
         self.index.get_or_init(|| {
@@ -241,18 +262,13 @@ impl PackageStorage {
                     }
                 };
 
-                let mut entries: Vec<PackageIndexEntry> = match serde_json::from_reader(reader) {
+                match read_package_index(reader) {
                     Ok(entry) => entry,
                     Err(err) => {
                         log::error!("Failed to parse package index: {err} from {url}");
-                        return vec![];
+                        vec![]
                     }
-                };
-                for entry in &mut entries {
-                    entry.namespace = PREVIEW_NS.into();
                 }
-
-                entries
             })
             .unwrap_or_default()
         })
@@ -292,6 +308,16 @@ impl PackageStorage {
     }
 }
 
+fn read_package_index(reader: impl Read) -> serde_json::Result<Vec<PackageIndexEntry>> {
+    // serde_json reads individual bytes from an unbuffered reader. On a
+    // blocking HTTP response, each read crosses reqwest's async bridge.
+    let mut entries: Vec<PackageIndexEntry> = serde_json::from_reader(BufReader::new(reader))?;
+    for entry in &mut entries {
+        entry.namespace = PREVIEW_NS.into();
+    }
+    Ok(entries)
+}
+
 pub(crate) fn threaded_http<T: Send + Sync>(
     url: &str,
     cert_path: Option<&Path>,
@@ -319,4 +345,118 @@ pub(crate) fn threaded_http<T: Send + Sync>(
         .join()
         .ok()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::*;
+
+    fn storage() -> PackageStorage {
+        PackageStorage::new(None, None, None, Arc::new(Mutex::new(DummyNotifier)))
+    }
+
+    #[test]
+    fn concurrent_index_prefetch_has_one_owner() {
+        let storage = storage();
+        let owners = std::thread::scope(|scope| {
+            let threads = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..32)
+                            .filter(|_| storage.try_claim_index_prefetch())
+                            .count()
+                    })
+                })
+                .collect::<Vec<_>>();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .sum::<usize>()
+        });
+        assert_eq!(owners, 1);
+        assert!(storage.cached_index().is_none());
+        assert!(!storage.try_claim_index_prefetch());
+    }
+
+    #[test]
+    fn cached_empty_index_does_not_schedule_prefetch() {
+        let storage = storage();
+        storage.index.set(Vec::new()).unwrap();
+        assert!(!storage.try_claim_index_prefetch());
+        assert!(storage.download_index().is_empty());
+    }
+
+    #[test]
+    fn package_index_reads_are_buffered_and_preserve_entries() {
+        struct CountReads<'a> {
+            body: &'a [u8],
+            calls: usize,
+        }
+        impl Read for CountReads<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.calls += 1;
+                self.body.read(buffer)
+            }
+        }
+
+        let description = "A package with a long description. ".repeat(128);
+        let body = serde_json::to_vec(
+            &(0..16)
+                .map(|index| {
+                    serde_json::json!({
+                        "name": format!("buffered-{index}"),
+                        "version": "0.1.0",
+                        "entrypoint": "lib.typ",
+                        "description": description,
+                        "updatedAt": 0,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let mut reader = CountReads {
+            body: &body,
+            calls: 0,
+        };
+        let entries = read_package_index(&mut reader).unwrap();
+
+        assert_eq!(entries.len(), 16);
+        for (index, entry) in entries.iter().enumerate() {
+            assert_eq!(entry.package.name, format!("buffered-{index}"));
+            assert_eq!(
+                entry.package.description.as_deref(),
+                Some(description.as_str())
+            );
+            assert_eq!(entry.namespace, PREVIEW_NS);
+            assert_eq!(entry.package.version, "0.1.0".parse().unwrap());
+        }
+        assert!(reader.body.is_empty());
+        // The old unbuffered parser performs one upstream read per byte.
+        // Leave the precise buffer size unspecified while rejecting that cost.
+        assert!(reader.calls < 64, "upstream reads: {}", reader.calls);
+    }
+
+    #[test]
+    fn package_index_preserves_parse_and_read_failures() {
+        assert!(
+            read_package_index(&b"[{\"name\":"[..])
+                .unwrap_err()
+                .is_eof()
+        );
+
+        struct FailedRead;
+        impl Read for FailedRead {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(
+                    io::ErrorKind::ConnectionReset,
+                    "disconnected",
+                ))
+            }
+        }
+        let error = read_package_index(FailedRead).unwrap_err();
+        assert!(error.is_io());
+        assert_eq!(error.io_error_kind(), Some(io::ErrorKind::ConnectionReset));
+    }
 }
