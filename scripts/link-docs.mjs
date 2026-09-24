@@ -1,7 +1,7 @@
 import { resolve, basename, relative } from "path";
 import * as fs from "fs";
 import * as util from "util";
-// Modified by Flow: dedicated project README source and focused generation.
+// Modified by Typst Relay: dedicated project README source and focused generation.
 import { execSync, execFileSync } from "child_process";
 const exec = util.promisify(execSync);
 
@@ -173,7 +173,7 @@ const maintainerMd = async () => {
 
 const tasks = [
   {
-    input: "docs/tinymist/flow.typ",
+    input: "docs/tinymist/typst-relay.typ",
     output: "README.md",
   },
   {

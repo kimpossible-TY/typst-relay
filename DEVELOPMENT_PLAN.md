@@ -1,4 +1,4 @@
-# Flow 개발 계획
+# Typst Relay 개발 계획
 
 작성: 2026-09-19. 작업 디렉터리: `~/Developer/tinymist`.
 
@@ -67,6 +67,6 @@
 
 ## 개발 저장소 통합 — 2026-09-24
 
-프로젝트 이름은 Flow로 사용하고 `kimpossible-TY/tinymist`의 `main`을 단일 개발 기준으로 삼는다. 기존 Flow 브랜치의 이력과 성능 개선을 보존하면서 main의 설정·포맷터 변경을 병합했다. README는 독립 프로젝트 소개로 다시 작성하며 포크 출처는 한 줄로 명시한다. 9월 23일 반복 편집·메모리·출력 검증 결과는 [성능 보고서 원본](docs/tinymist/dev/interactive-analysis-performance.typ)에 기록했다. 이전 날짜의 저장소 및 배포 설명은 당시 상태를 기록한 이력이다.
+프로젝트 이름은 Typst Relay로 사용하고 `kimpossible-TY/tinymist`의 `main`을 단일 개발 기준으로 삼는다. 기존 Flow 브랜치의 이력과 성능 개선을 보존하면서 main의 설정·포맷터 변경을 병합했다. README는 독립 프로젝트 소개로 다시 작성하며 포크 출처는 한 줄로 명시한다. 9월 23일 반복 편집·메모리·출력 검증 결과는 [성능 보고서 원본](docs/tinymist/dev/interactive-analysis-performance.typ)에 기록했다. 이전 날짜의 저장소 및 배포 설명은 당시 상태를 기록한 이력이다.
 
 통합 후 서버 테스트 65개(기존 ignored 3개), 분석 테스트 89개, CLI/LSP 통합 테스트 9개가 통과했다. 엄격한 서버 Clippy, Rust 포맷 검사와 릴리스 빌드도 통과했다. README는 Typst 원본에서 재생성하고 PDF/HTML 컴파일 및 링크를 확인했다. 템플릿의 로컬 미설치 글꼴 경고는 Markdown 출력에 영향을 주지 않았다. 기존 성능 수치는 9월 23일 후보 측정이며 이번 병합의 새 성능 측정으로 해석하지 않는다.

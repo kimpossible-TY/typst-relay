@@ -1,22 +1,22 @@
 #import "mod.typ": *
-#show: book-page.with(title: "Flow")
+#show: book-page.with(title: "Typst Relay")
 
-*A responsive workspace for Typst.*
+*A responsive language server and live preview for Typst.*
 
-Flow brings semantic highlighting, completion, navigation, formatting, and live preview to Typst projects. Its development focuses on keeping editing responsive as documents, diagrams, and package dependencies grow.
+Typst Relay brings semantic highlighting, completion, navigation, formatting, and live preview to Typst projects. Its development focuses on keeping editing responsive as documents, diagrams, and package dependencies grow.
 
 Forked from #link("https://github.com/Myriad-Dreamin/tinymist")[Tinymist] by Myriad-Dreamin and its contributors.
 
 #link("#get-started")[Get started] · #link("#performance")[Performance] · #link("#development")[Development] · #link("https://github.com/kimpossible-TY/tinymist/issues")[Issues]
 
-= What Flow does
+= What Typst Relay does
 
 - *Understand code without running the whole document.* Static dependency and module resolution avoid unnecessary document execution during semantic analysis.
 - *Keep editing requests moving.* Supported read-only requests can be cancelled, and obsolete queued work is discarded when the document changes.
 - *Control retained work.* Coalesced cache cleanup limits retained generations, while source-only highlighting stays responsive during heavier analysis.
-- *Use the tools you already have.* Flow runs behind the existing Tinymist editor extension, with Typst preview, navigation, formatting, and completion in the same workspace.
+- *Use the tools you already have.* Typst Relay runs behind the existing Tinymist editor extension, with Typst preview, navigation, formatting, and completion in the same workspace.
 
-Flow is under active development. Context-dependent expressions can still require document layout, and running computations finish before releasing shared analysis resources.
+Typst Relay is under active development. Context-dependent expressions can still require document layout, and running computations finish before releasing shared analysis resources.
 
 = Get started
 
@@ -48,7 +48,7 @@ Use an absolute path. A Windows example is `C:/dev/tinymist/target/release/tinym
 
 For SSH, Tunnel, WSL, or Dev Container sessions, build on the machine running the remote extension host and put that machine's executable path in *Remote Settings*. Workspace settings take precedence, so remove any stale workspace override.
 
-Save your work and run *Developer: Reload Window*. Open a Typst file and start preview with the extension's usual preview command. Flow supplies the server; a separate extension or manually started LSP process is not required.
+Save your work and run *Developer: Reload Window*. Open a Typst file and start preview with the extension's usual preview command. Typst Relay supplies the server; a separate extension or manually started LSP process is not required.
 
 The executable and configuration identifiers remain `tinymist` for editor compatibility. Initial editor deployment was verified with the Tinymist 0.15.8 extension on macOS arm64. Check compatibility when changing extension versions.
 
@@ -64,7 +64,7 @@ Reload the VS Code window after rebuilding. To use the extension's bundled serve
 
 = Performance
 
-The latest repeated-edit investigation used an 8 GiB macOS arm64 machine and a 281-page Typst book with its original packages. The following medians compare only the same completed editing rounds in the preserved earlier Flow build and the optimized build:
+The latest repeated-edit investigation used an 8 GiB macOS arm64 machine and a 281-page Typst book with its original packages. The following medians compare only the same completed editing rounds in the preserved earlier server build and the optimized build:
 
 #table(
   columns: 4,
@@ -82,7 +82,7 @@ The server-only output comparison preserved all 281 pages: extracted text, word 
 
 = Development
 
-#link("https://github.com/kimpossible-TY/tinymist")[kimpossible-TY/tinymist] is the development repository, and `main` is the integration branch. The earlier separate Flow repository is retained as historical storage.
+#link("https://github.com/kimpossible-TY/tinymist")[kimpossible-TY/tinymist] is the development repository, and `main` is the integration branch. The earlier separate `tinymist-flow` repository is retained as historical storage.
 
 - #link("docs/dev-guide.md")[Developer guide] — toolchain, crates, and editor tooling.
 - #link("DEVELOPMENT_PLAN.md")[Development plan] — current priorities and investigation history.
@@ -92,7 +92,7 @@ The server-only output comparison preserved all 281 pages: extracted text, word 
 
 Set `upstream` to `https://github.com/Myriad-Dreamin/tinymist.git` when syncing shared changes. Contributions intended for the original project should start on a separate branch based on `upstream/main`.
 
-README is generated from `docs/tinymist/flow.typ`. Edit that source and regenerate with `node scripts/link-docs.mjs --readme-only` after building the `typlite` binary. See #link("AGENTS.md")[AGENTS.md] for repository conventions.
+README is generated from `docs/tinymist/typst-relay.typ`. Edit that source and regenerate with `node scripts/link-docs.mjs --readme-only` after building the `typlite` binary. See #link("AGENTS.md")[AGENTS.md] for repository conventions.
 
 = License
 
