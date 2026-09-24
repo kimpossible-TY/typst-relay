@@ -35,7 +35,7 @@ You don't have to configure anything to start developing tinymist. However, here
 To build tinymist LSP:
 
 ```bash
-git clone https://github.com/Myriad-Dreamin/tinymist.git
+git clone https://github.com/kimpossible-TY/tinymist.git
 # Debug
 cargo build
 # Release

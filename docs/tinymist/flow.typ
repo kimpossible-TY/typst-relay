@@ -1,178 +1,99 @@
 #import "mod.typ": *
-#show: book-page.with(title: "Tinymist Flow")
+#show: book-page.with(title: "Flow")
 
-*Keep the colors. Keep writing.*
+*A responsive workspace for Typst.*
 
-A performance-focused server fork of #link("https://github.com/Myriad-Dreamin/tinymist")[Tinymist] for Typst documents with expensive analysis paths. Built to keep semantic highlighting useful without making dependency discovery execute the document.
+Flow brings semantic highlighting, completion, navigation, formatting, and live preview to Typst projects. Its development focuses on keeping editing responsive as documents, diagrams, and package dependencies grow.
 
-*Status:* experimental · based on Tinymist 0.15.8 · Apache-2.0
+Forked from #link("https://github.com/Myriad-Dreamin/tinymist")[Tinymist] by Myriad-Dreamin and its contributors.
 
-#link("#get-started")[Get started] · #link("#measured-results")[Measured results] · #link("DEVELOPMENT_PLAN.md")[Development plan] · #link("https://myriad-dreamin.github.io/tinymist/")[Upstream documentation]
+#link("#get-started")[Get started] · #link("#performance")[Performance] · #link("#development")[Development] · #link("https://github.com/kimpossible-TY/tinymist/issues")[Issues]
 
-= Why Flow?
+= What Flow does
 
-Typing should not trigger document layout just to discover an import. In the investigated regression, an import inside an uncalled function could send semantic-token analysis through runtime tracing. The command-line compiler remained fast on the user's document while editor requests stalled.
+- *Understand code without running the whole document.* Static dependency and module resolution avoid unnecessary document execution during semantic analysis.
+- *Keep editing requests moving.* Supported read-only requests can be cancelled, and obsolete queued work is discarded when the document changes.
+- *Control retained work.* Coalesced cache cleanup limits retained generations, while source-only highlighting stays responsive during heavier analysis.
+- *Use the tools you already have.* Flow runs behind the existing Tinymist editor extension, with Typst preview, navigation, formatting, and completion in the same workspace.
 
-Flow starts with a narrow fix: discover literal dependencies statically, leave unresolved expressions for later analysis, and preserve semantic tokens. It keeps the existing Tinymist extension and replaces the server executable behind it.
-
-```text
-VS Code + existing Tinymist extension
-                  |
-         tinymist.serverPath
-                  |
-         Tinymist Flow server
-                  |
-    Typst analysis and preview
-```
-
-= What changed
-
-- *Static dependency discovery.* Import/include discovery no longer falls back to runtime tracing for non-literal sources.
-- *Semantic colors stay on.* The regression fixture returns exactly the same token array and legend as upstream.
-- *Reproducible checks.* A standalone LSP harness compares the patched server with an unmodified baseline.
-
-Imports inside uncalled functions are still inspected. Other dynamic-expression fallback paths remain; this patch does not promise zero tracing for every document or solve every preview delay.
-
-= Measured results
-
-Single fresh-server semantic-token requests, measured on an 8 GiB macOS arm64 machine with matching Rust toolchains and release build settings:
-
-#table(
-  columns: 3,
-  [*Input*], [*Upstream 0.15.8*], [*Flow, first patch*],
-  [Unused-import reproducer], [5.551 s], [3.518 ms],
-  [Control without the import], [0.744 ms], [0.743 ms],
-  [Private document entry], [Timed out after 25 s], [230 ms],
-)
-
-The reproducer deliberately amplifies unnecessary tracing with expensive layout. These are individual measurements, not typical latency or a general speedup claim. Token arrays and legends match for the reproducer and control; the timed-out private baseline cannot establish token equivalence. The private document is not distributed.
-
-The first patch passed 74 query tests, 9 CLI/LSP end-to-end tests, and 5 harness tests. Long editing sessions, memory stability, and remote preview delivery still need validation. See the #link("openspec/changes/static-import-discovery/validation.md")[measurement and validation record] for methodology and limits.
+Flow is under active development. Context-dependent expressions can still require document layout, and running computations finish before releasing shared analysis resources.
 
 = Get started
 
-*Keep your existing Tinymist extension installed and enabled.* Flow supplies the server that it launches. It will not appear as another extension in the Extensions panel, and you do not need to build or install a VSIX.
+== Build
 
-The initial deployment used Tinymist extension 0.15.8 on macOS arm64. Compatibility with newer extension versions and other platforms has not yet been established.
-
-== 1. Choose where the server will run
-
-#table(
-  columns: 3,
-  [*VS Code setup*], [*Install/enable Tinymist in*], [*Build Flow and use a path on*],
-  [Local folder], [Local VS Code], [Your local computer],
-  [Remote SSH or Tunnel], [The connected remote environment], [The remote machine],
-  [Dev Container or WSL], [The container or WSL environment], [That container or WSL environment],
-)
-
-For a remote session, open a terminal in the connected VS Code window and perform the build there. A path on your laptop cannot identify a server binary on a different host. Build for the host's operating system and CPU architecture; a macOS executable cannot run on a Linux host.
-
-== 2. Build the server
-
-Install Rust through rustup and the native build tools for your operating system. This checkout pins its Rust toolchain. In a terminal on the server host:
+Install Rust through rustup and the native build tools for your operating system. The repository pins the Rust toolchain.
 
 ```bash
-git clone https://github.com/kimpossible-TY/tinymist-flow.git
-cd tinymist-flow
+git clone https://github.com/kimpossible-TY/tinymist.git
+cd tinymist
 cargo build --locked --release --bin tinymist
 ./target/release/tinymist probe
 ```
 
-The commands above use a macOS/Linux shell. A successful `probe` exits with status 0; it does not need to print a success message. On Windows the executable is `target/release/tinymist.exe`.
+On Windows, the executable is `target/release/tinymist.exe`. On a memory-constrained macOS/Linux host, prefix the build command with `CARGO_BUILD_JOBS=2`.
 
-While the repository is private, cloning requires an account with access and authenticated Git credentials. You can alternatively clone with an authenticated GitHub CLI using `gh repo clone kimpossible-TY/tinymist-flow`.
+== Connect VS Code
 
-For a machine with limited memory, use `CARGO_BUILD_JOBS=2 cargo build --locked --release --bin tinymist` in a macOS/Linux shell. The first build can take time; these build times are unrelated to document editing latency.
-
-== 3. Tell the existing extension to use Flow
-
-Open the *Typst document project* in VS Code. Open the Command Palette with *Cmd+Shift+P* on macOS or *Ctrl+Shift+P* on Windows/Linux, then run *Preferences: Open Workspace Settings (JSON)*.
-
-For a normal single-folder project, this edits `.vscode/settings.json`. Merge the following entries into the existing JSON object; keep your existing root, entry-file, preview, and other settings:
+Install and enable the existing Tinymist extension. In your VS Code settings, select the built executable:
 
 ```json
 {
-  "tinymist.serverPath": "/absolute/path/to/tinymist-flow/target/release/tinymist",
+  "tinymist.serverPath": "/absolute/path/to/tinymist/target/release/tinymist",
   "tinymist.semanticTokens": "enable"
 }
 ```
 
-Replace the example path with the actual executable path. On macOS/Linux, run `pwd` in the cloned repository and append `/target/release/tinymist`. Use a full absolute path instead of `~`, environment variables, or workspace-variable placeholders. On Windows, an example JSON value is `"C:/dev/tinymist-flow/target/release/tinymist.exe"`.
+Use an absolute path. A Windows example is `C:/dev/tinymist/target/release/tinymist.exe`.
 
-If you want all local projects to use Flow, use *Preferences: Open User Settings (JSON)* instead. For all projects on a remote host, use *Preferences: Open Remote Settings (JSON)* in the connected window. Workspace settings can override those choices. Host-specific absolute paths are usually best kept in your personal or remote settings when sharing a project with other people. See #link("https://code.visualstudio.com/docs/configure/settings")[VS Code's settings guide].
+For SSH, Tunnel, WSL, or Dev Container sessions, build on the machine running the remote extension host and put that machine's executable path in *Remote Settings*. Workspace settings take precedence, so remove any stale workspace override.
 
-== 4. Reload and open your preview
+Save your work and run *Developer: Reload Window*. Open a Typst file and start preview with the extension's usual preview command. Flow supplies the server; a separate extension or manually started LSP process is not required.
 
-Save your files and settings, then run *Developer: Reload Window* from the Command Palette. Open a `.typ` file and use your usual Tinymist preview command or preview button.
+The executable and configuration identifiers remain `tinymist` for editor compatibility. Initial editor deployment was verified with the Tinymist 0.15.8 extension on macOS arm64. Check compatibility when changing extension versions.
 
-Use a window reload after changing `serverPath`: the extension caches the resolved executable path, so restarting only the language server may reuse the previous path. Once connected, semantic colors, hover, completion, and preview remain available through the familiar Tinymist extension UI.
+== Update
 
-The extension starts Flow itself. You do not need to run a separate `tinymist lsp` command or change preview port-forwarding settings just to select this server. Existing remote preview networking still needs to work independently.
+```bash
+git switch main
+git pull --ff-only origin main
+cargo build --locked --release --bin tinymist
+```
 
-== 5. Check that the switch worked
+Reload the VS Code window after rebuilding. To use the extension's bundled server again, remove `tinymist.serverPath` from the settings scopes that define it and reload.
 
-- Open *View → Output* and select *Tinymist Typst*. Check that server startup succeeds without a “Could not find a valid tinymist binary” error.
-- Confirm that your effective `tinymist.serverPath` points to the Flow executable, and that `tinymist.semanticTokens` is `"enable"`.
-- For a stronger check on macOS/Linux, run `pgrep -fl tinymist` on the extension host. Identify the language-server process launched with your configured path and `lsp`; other open VS Code windows may have their own servers.
-- Edit, hover, and reopen the preview in your document. This checks the editor experience; it does not by itself establish a performance benchmark.
+= Performance
 
-The first patch retains upstream version metadata. Seeing `0.15.8` in `--version` is expected and does not distinguish Flow from upstream. Use the selected executable path and, when needed, its checksum to identify your build.
-
-== Troubleshooting
+The latest repeated-edit investigation used an 8 GiB macOS arm64 machine and a 281-page Typst book with its original packages. The following medians compare only the same completed editing rounds in the preserved earlier Flow build and the optimized build:
 
 #table(
-  columns: 2,
-  [*Symptom*], [*What to check*],
-  [No “Tinymist Flow” extension appears], [Expected: keep using the existing Tinymist extension. Flow replaces its server.],
-  [“Could not find a valid tinymist binary”], [Check the absolute path, executable permissions, host OS/architecture, and run that executable with `probe` on the extension host.],
-  [The old server still seems active], [Check workspace overrides and run Developer: Reload Window after changing the path.],
-  [Meaning-based colors are missing], [Keep `tinymist.semanticTokens` enabled. Check whether VS Code or the active theme disables semantic highlighting; if needed, set `editor.semanticHighlighting.enabled` to `true`.],
-  [Remote preview still fails], [Inspect Tinymist output and the existing remote connection/port forwarding. This analysis patch is not a general networking fix.],
+  columns: 4,
+  table.header([Operation], [Shared rounds], [Earlier build], [Optimized build]),
+  [Semantic tokens], [2], [7.994 s], [0.394 s],
+  [Compile after edit], [3], [4.385 s], [4.408 s],
+  [Contextual completion], [2], [4.558 s], [4.870 s],
 )
 
-== Updating and returning to upstream
+The optimized build completed all 12 edits in each of four scenarios, with peak process footprints of 3.674–4.734 GiB. The earlier build reached a 5 GiB diagnostic guard after 1–3 completed edits. Semantic-token full-document traces fell from two per edit to zero, and all eight comparable successful query responses matched.
 
-To update Flow, fetch the desired revision, rebuild with the same release command, and reload the VS Code window. If the executable cannot be replaced while running, close the windows using it first, then build and reopen them. Updating the Marketplace extension does not update your custom server binary, and compatibility with a new extension version should be checked before relying on it.
+These are workload-specific observations from sequential runs on a shared machine. Ordinary compilation was approximately unchanged, and contextual completion was slightly slower. Twelve edits do not establish indefinite memory stability. Remote preview transmission and client rendering were not measured.
 
-To return to the bundled server, remove `tinymist.serverPath` from whichever settings scopes define it, then run *Developer: Reload Window*. Semantic tokens may remain enabled. If you previously replaced the extension's bundled executable manually, also restore its original backup or reinstall the extension; removing the setting alone cannot undo that replacement.
+The server-only output comparison preserved all 281 pages: extracted text, word coordinates to 0.001 pt, and rendered pixels at 96 ppi matched. See the #link("docs/tinymist/dev/interactive-analysis-performance.typ")[investigation report source] for methods, validation, and remaining limits. Measurements describe the September 23 candidate; subsequent integration with main has separate regression checks.
 
-= Reproduce the regression
+= Development
 
-Requires Python 3.9 or newer. Build an unmodified Tinymist 0.15.8 baseline separately with matching compiler and build settings, then run:
+#link("https://github.com/kimpossible-TY/tinymist")[kimpossible-TY/tinymist] is the development repository, and `main` is the integration branch. The earlier separate Flow repository is retained as historical storage.
 
-```bash
-python3 tests/perf/static-import-discovery/runner.py \
-  --binary target/release/tinymist \
-  --baseline /absolute/path/to/baseline/tinymist \
-  --require-baseline-trace
-```
+- #link("docs/dev-guide.md")[Developer guide] — toolchain, crates, and editor tooling.
+- #link("DEVELOPMENT_PLAN.md")[Development plan] — current priorities and investigation history.
+- #link("openspec/changes/optimize-interactive-analysis/tasks.md")[Interactive analysis work] — implemented behavior and validation.
+- #link("tests/perf/static-import-discovery/runner.py")[LSP regression harness] — a reproducible static-import workload.
+- #link("https://myriad-dreamin.github.io/tinymist/")[Tinymist documentation] — shared configuration and editor features.
 
-The harness checks nonempty semantic-token output, exact token/legend equality, and analysis trace counts. Generated results stay outside version control. See #link("tests/perf/static-import-discovery/runner.py")[the harness] and #link("openspec/changes/static-import-discovery/design.md")[the patch design].
+Set `upstream` to `https://github.com/Myriad-Dreamin/tinymist.git` when syncing shared changes. Contributions intended for the original project should start on a separate branch based on `upstream/main`.
 
-= Next steps
+README is generated from `docs/tinymist/flow.typ`. Edit that source and regenerate with `node scripts/link-docs.mjs --readme-only` after building the `typlite` binary. See #link("AGENTS.md")[AGENTS.md] for repository conventions.
 
-- Validate extended editing sessions with semantic highlighting enabled.
-- Measure memory use and preview responsiveness in remote sessions.
-- Investigate remaining dynamic analysis paths with reproducible fixtures.
-- Keep fixes small enough to review and contribute upstream.
+= License
 
-See #link("DEVELOPMENT_PLAN.md")[the development plan] and #link("PUBLIC_READINESS.md")[the publication review]. Open issues about this fork in #link("https://github.com/kimpossible-TY/tinymist-flow/issues")[this repository].
-
-= Development and documentation
-
-The runtime patch is in `crates/tinymist-query/src/analysis/pdg.rs`. Existing crate names, extension identifiers, and upstream version metadata are retained. The first preserved patch is tagged `fork-v0.15.8-p1`.
-
-This README is generated from `docs/tinymist/flow.typ`. To regenerate only this page:
-
-```bash
-cargo build --locked --bin typlite
-node scripts/link-docs.mjs --readme-only
-```
-
-The upstream documentation source remains available in `docs/tinymist/introduction.typ`. See #link("docs/dev-guide.md")[the developer guide] for the broader repository workflow.
-
-= Attribution and license
-
-Tinymist Flow is an independent derivative of #link("https://github.com/Myriad-Dreamin/tinymist")[Tinymist], created by Myriad-Dreamin and its contributors. It is not an official upstream release. The language server, preview system, and editor integrations originate from that project; this fork currently adds a focused dependency-discovery fix and its regression coverage.
-
-Distributed under #link("LICENSE")[Apache License 2.0]. Existing copyright, attribution, and third-party notices are retained. Upstream documentation describes upstream capabilities; it is not a claim that upstream CI validates this fork.
+Distributed under #link("LICENSE")[Apache License 2.0]. Existing copyright and third-party notices are retained.

@@ -1,7 +1,7 @@
 import { resolve, basename, relative } from "path";
 import * as fs from "fs";
 import * as util from "util";
-// Modified by Tinymist Flow: dedicated fork README source and focused generation.
+// Modified by Flow: dedicated project README source and focused generation.
 import { execSync, execFileSync } from "child_process";
 const exec = util.promisify(execSync);
 

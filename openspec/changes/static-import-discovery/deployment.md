@@ -2,6 +2,8 @@
 
 Date: 2026-09-19 (Asia/Seoul).
 
+Historical deployment record. Since 2026-09-24, development uses `kimpossible-TY/tinymist` on `main`; remote names and active settings below describe the original deployment.
+
 ## Source preservation
 
 - Private independent repository: https://github.com/kimpossible-TY/tinymist-flow

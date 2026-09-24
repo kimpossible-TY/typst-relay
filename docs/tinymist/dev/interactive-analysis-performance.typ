@@ -5,7 +5,7 @@
 
 = Interactive analysis performance
 
-Investigation date: 23 September 2026. Scope: the Tinymist Flow server on an
+Investigation date: 23 September 2026. Scope: the Flow server on an
 8 GiB macOS arm64 machine, using a saved private Typst book and the original
 installed packages. The document itself is not distributed.
 
