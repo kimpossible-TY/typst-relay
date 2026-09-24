@@ -1,4 +1,5 @@
 use core::fmt;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, OnceLock};
 
@@ -164,7 +165,7 @@ pub struct Config {
     /// Sets the indent size (using space) for the formatter.
     pub formatter_indent_size: Option<u32>,
     /// Sets the hard line wrapping mode for the formatter.
-    pub formatter_prose_wrap: Option<bool>,
+    pub formatter_prose_wrap: Option<FormatterProseWrap>,
     /// The warnings during configuration update.
     pub warnings: Vec<CowStr>,
 }
@@ -298,17 +299,52 @@ impl Config {
     }
 
     /// Converts config values to a map object.
+    ///
+    /// The server asks for both the `tinymist.<key>` and the `<key>` section of
+    /// every setting, and a client may answer the whole `tinymist` section with
+    /// a namespaced object. All of those describe settings in the same
+    /// namespace, so they are merged into the flat shape that
+    /// [`Config::update_by_map`] reads, keeping the precedence that the
+    /// namespace has over top-level settings.
+    ///
+    /// The answer of a single `tinymist.<key>` section wins over the namespace
+    /// object: the client resolved it for that key, and some clients normalize
+    /// it there but not inside the object, e.g. VS Code substitutes editor
+    /// variables in the former only.
     pub fn values_to_map(values: Vec<JsonValue>) -> Map<String, JsonValue> {
-        let unpaired_values = values
-            .into_iter()
-            .tuples()
-            .map(|(a, b)| if !a.is_null() { a } else { b });
+        // The object answered for the whole `tinymist` section.
+        let mut namespace = Map::new();
+        let mut map = Map::new();
 
-        CONFIG_ITEMS
-            .iter()
-            .map(|&item| item.to_owned())
-            .zip(unpaired_values)
-            .collect()
+        for (&item, (namespaced, top_level)) in CONFIG_ITEMS.iter().zip(values.into_iter().tuples())
+        {
+            if item == "tinymist" {
+                namespace = top_level.as_object().cloned().unwrap_or_default();
+                continue;
+            }
+
+            map.insert(
+                item.to_owned(),
+                if !namespaced.is_null() {
+                    namespaced
+                } else {
+                    top_level
+                },
+            );
+        }
+
+        // Settings the client did not resolve per key come from the namespace
+        // object, which is the only answer a pure eglot client gives.
+        for (key, value) in namespace {
+            match map.get(&key) {
+                Some(existing) if !existing.is_null() => {}
+                _ => {
+                    map.insert(key, value);
+                }
+            }
+        }
+
+        map
     }
 
     /// Updates (and validates) the configuration by a JSON object.
@@ -317,14 +353,7 @@ impl Config {
     /// configuration before updating and revert if the update fails.
     pub fn update(&mut self, update: &JsonValue) -> Result<()> {
         if let JsonValue::Object(update) = update {
-            self.update_by_map(update)?;
-
-            // Configurations in the tinymist namespace take precedence.
-            if let Some(namespaced) = update.get("tinymist").and_then(JsonValue::as_object) {
-                self.update_by_map(namespaced)?;
-            }
-
-            Ok(())
+            self.update_by_map(update)
         } else {
             tinymist_l10n::bail!(
                 "tinymist.config.invalidObject",
@@ -332,6 +361,23 @@ impl Config {
                 object = update.debug_l10n(),
             )
         }
+    }
+
+    /// Unpacks a `tinymist`-namespaced configuration object.
+    ///
+    /// The two forms documented for clients, `{"exportTarget": "bundle"}` and
+    /// `{"tinymist": {"exportTarget": "bundle"}}`, describe the same settings,
+    /// so they are flattened into one shape here.
+    fn unpack_namespace(update: &Map<String, JsonValue>) -> Cow<'_, Map<String, JsonValue>> {
+        let Some(JsonValue::Object(namespaced)) = update.get("tinymist") else {
+            return Cow::Borrowed(update);
+        };
+
+        // Configurations in the tinymist namespace take precedence.
+        let mut flat = update.clone();
+        flat.extend(namespaced.clone());
+
+        Cow::Owned(flat)
     }
 
     /// Updates (and validates) the configuration by a map object.
@@ -343,6 +389,9 @@ impl Config {
             "ServerState: config update_by_map {}",
             serde_json::to_string(update).unwrap_or_else(|e| e.to_string())
         );
+
+        let flattened = Self::unpack_namespace(update);
+        let update = flattened.as_ref();
 
         self.warnings.clear();
 
@@ -395,7 +444,7 @@ impl Config {
         assign_config!(formatter_mode := "formatterMode"?: FormatterMode);
         assign_config!(formatter_print_width := "formatterPrintWidth"?: Option<u32>);
         assign_config!(formatter_indent_size := "formatterIndentSize"?: Option<u32>);
-        assign_config!(formatter_prose_wrap := "formatterProseWrap"?: Option<bool>);
+        assign_config!(formatter_prose_wrap := "formatterProseWrap"?: Option<FormatterProseWrap>);
         assign_config!(output_path := "outputPath"?: PathPattern);
         assign_config!(preview := "preview"?: PreviewFeat);
         assign_config!(lint := "lint"?: LintFeat);
@@ -576,7 +625,10 @@ impl Config {
     pub fn formatter(&self) -> FormatUserConfig {
         let formatter_print_width = self.formatter_print_width.unwrap_or(120) as usize;
         let formatter_indent_size = self.formatter_indent_size.unwrap_or(2) as usize;
-        let formatter_line_wrap = self.formatter_prose_wrap.unwrap_or(false);
+        let formatter_prose_wrap = self.formatter_prose_wrap.unwrap_or_default();
+        // `typstfmt` only distinguishes whether text is wrapped at all, so both
+        // `fill` and `sentence` map to its line wrapping.
+        let formatter_line_wrap = formatter_prose_wrap != FormatterProseWrap::None;
 
         FormatUserConfig {
             config: match self.formatter_mode {
@@ -584,7 +636,7 @@ impl Config {
                     FormatterConfig::Typstyle(Box::new(typstyle_core::Config {
                         tab_spaces: formatter_indent_size,
                         max_width: formatter_print_width,
-                        wrap_text: formatter_line_wrap,
+                        wrap_mode: formatter_prose_wrap.to_typstyle(),
                         ..typstyle_core::Config::default()
                     }))
                 }
@@ -1075,6 +1127,88 @@ pub enum FormatterMode {
     Typstfmt,
 }
 
+/// How the formatter reflows prose inside markup.
+///
+/// This models `typstyle`'s text wrapping modes. It also accepts the boolean
+/// form, which predates the wrapping modes: `true` means
+/// [`FormatterProseWrap::Fill`] and `false` means [`FormatterProseWrap::None`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FormatterProseWrap {
+    /// Keep the original line breaks and spaces.
+    #[default]
+    None,
+    /// Wrap prose to fit within the configured print width.
+    Fill,
+    /// Place each sentence on its own line.
+    Sentence,
+}
+
+impl FormatterProseWrap {
+    /// Converts this setting to the `typstyle` text wrapping mode.
+    pub fn to_typstyle(self) -> typstyle_core::WrapMode {
+        match self {
+            FormatterProseWrap::None => typstyle_core::WrapMode::None,
+            FormatterProseWrap::Fill => typstyle_core::WrapMode::Fill,
+            FormatterProseWrap::Sentence => typstyle_core::WrapMode::Sentence,
+        }
+    }
+}
+
+impl Serialize for FormatterProseWrap {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(match self {
+            FormatterProseWrap::None => "none",
+            FormatterProseWrap::Fill => "fill",
+            FormatterProseWrap::Sentence => "sentence",
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for FormatterProseWrap {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = FormatterProseWrap;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("one of \"none\", \"fill\", \"sentence\", or a boolean")
+            }
+
+            fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(if v {
+                    FormatterProseWrap::Fill
+                } else {
+                    FormatterProseWrap::None
+                })
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match v {
+                    "none" => Ok(FormatterProseWrap::None),
+                    "fill" => Ok(FormatterProseWrap::Fill),
+                    "sentence" => Ok(FormatterProseWrap::Sentence),
+                    _ => Err(E::unknown_variant(v, &["none", "fill", "sentence"])),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
 /// The mode of semantic tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1305,6 +1439,46 @@ mod tests {
         good_config(&mut config, &update);
 
         assert_eq!(config.export_pdf, TaskWhen::OnType);
+    }
+
+    /// Regression test for issue #2714: a `tinymist`-namespaced object must be
+    /// honored outside `initializationOptions` as well, both when it arrives in
+    /// a `workspace/didChangeConfiguration` payload and when it is answered for
+    /// the `tinymist` section of a `workspace/configuration` pull.
+    #[test]
+    fn test_namespaced_config_outside_initialization_options() {
+        // The notification path, which reads the payload through
+        // `update_by_map`.
+        let mut config = Config::default();
+        let update = json!({
+            "tinymist": {
+                "exportPdf": "onType",
+            }
+        });
+        config
+            .update_by_map(update.as_object().unwrap())
+            .expect("valid config");
+
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.export_pdf, TaskWhen::OnType);
+
+        // The pull path, where the answer of the `tinymist` section is a
+        // namespaced object and reaches `update_by_map` through
+        // `values_to_map`.
+        let values = Config::get_items()
+            .into_iter()
+            .map(|item| match item.section.as_deref() {
+                Some("tinymist") => json!({ "exportTarget": "bundle" }),
+                _ => JsonValue::Null,
+            })
+            .collect::<Vec<_>>();
+        let mut config = Config::default();
+        config
+            .update_by_map(&Config::values_to_map(values))
+            .expect("valid config");
+
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.export_target, ExportTarget::Bundle);
     }
 
     #[test]
