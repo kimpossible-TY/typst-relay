@@ -2,7 +2,7 @@
 
 Date: 2026-09-19 (Asia/Seoul).
 
-Historical deployment record. Since 2026-09-24, development uses `kimpossible-TY/tinymist` on `main`; remote names and active settings below describe the original deployment.
+Historical deployment record. Since 2026-09-24, development uses `kimpossible-TY/typst-relay` on `main`; remote names and active settings below describe the original deployment.
 
 ## Source preservation
 

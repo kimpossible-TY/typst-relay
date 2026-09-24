@@ -6,7 +6,7 @@
 
 큰 수학 문서, CeTZ/Fletcher 및 로컬 패키지를 사용하는 편집에서 의미 색상을 유지하면서 분석 지연, 불필요한 컴파일, 요청 누적을 줄인다. 문서의 컴파일 의미는 유지한다.
 
-- Development repository: https://github.com/kimpossible-TY/tinymist (`origin`, `main`).
+- Development repository: https://github.com/kimpossible-TY/typst-relay (`origin`, `main`).
 - Historical repository: https://github.com/kimpossible-TY/tinymist-flow (no longer the development destination).
 - Upstream: https://github.com/Myriad-Dreamin/tinymist
 - 최초 개발 기준: 0.15.8 실행 파일의 소스 커밋 `32f908199ee17ea295512bbc27166e890c438175`.
@@ -67,6 +67,6 @@
 
 ## 개발 저장소 통합 — 2026-09-24
 
-프로젝트 이름은 Typst Relay로 사용하고 `kimpossible-TY/tinymist`의 `main`을 단일 개발 기준으로 삼는다. 기존 Flow 브랜치의 이력과 성능 개선을 보존하면서 main의 설정·포맷터 변경을 병합했다. README는 독립 프로젝트 소개로 다시 작성하며 포크 출처는 한 줄로 명시한다. 9월 23일 반복 편집·메모리·출력 검증 결과는 [성능 보고서 원본](docs/tinymist/dev/interactive-analysis-performance.typ)에 기록했다. 이전 날짜의 저장소 및 배포 설명은 당시 상태를 기록한 이력이다.
+프로젝트 이름은 Typst Relay로 사용하고 `kimpossible-TY/typst-relay`의 `main`을 단일 개발 기준으로 삼는다. 기존 Flow 브랜치의 이력과 성능 개선을 보존하면서 main의 설정·포맷터 변경을 병합했다. README는 독립 프로젝트 소개로 다시 작성하며 포크 출처는 한 줄로 명시한다. 9월 23일 반복 편집·메모리·출력 검증 결과는 [성능 보고서 원본](docs/tinymist/dev/interactive-analysis-performance.typ)에 기록했다. 이전 날짜의 저장소 및 배포 설명은 당시 상태를 기록한 이력이다.
 
 통합 후 서버 테스트 65개(기존 ignored 3개), 분석 테스트 89개, CLI/LSP 통합 테스트 9개가 통과했다. 엄격한 서버 Clippy, Rust 포맷 검사와 릴리스 빌드도 통과했다. README는 Typst 원본에서 재생성하고 PDF/HTML 컴파일 및 링크를 확인했다. 템플릿의 로컬 미설치 글꼴 경고는 Markdown 출력에 영향을 주지 않았다. 기존 성능 수치는 9월 23일 후보 측정이며 이번 병합의 새 성능 측정으로 해석하지 않는다.

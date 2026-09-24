@@ -7,7 +7,7 @@ Typst Relay brings semantic highlighting, completion, navigation, formatting, an
 
 Forked from [Tinymist](https://github.com/Myriad-Dreamin/tinymist) by Myriad-Dreamin and its contributors.
 
-[Get started](#get-started) · [Performance](#performance) · [Development](#development) · [Issues](https://github.com/kimpossible-TY/tinymist/issues)
+[Get started](#get-started) · [Performance](#performance) · [Development](#development) · [Issues](https://github.com/kimpossible-TY/typst-relay/issues)
 
 ## What Typst Relay does
 
@@ -25,8 +25,8 @@ Typst Relay is under active development. Context-dependent expressions can still
 Install Rust through rustup and the native build tools for your operating system. The repository pins the Rust toolchain.
 
 ```bash
-git clone https://github.com/kimpossible-TY/tinymist.git
-cd tinymist
+git clone https://github.com/kimpossible-TY/typst-relay.git
+cd typst-relay
 cargo build --locked --release --bin tinymist
 ./target/release/tinymist probe
 ```
@@ -39,12 +39,12 @@ Install and enable the existing Tinymist extension. In your VS Code settings, se
 
 ```json
 {
-  "tinymist.serverPath": "/absolute/path/to/tinymist/target/release/tinymist",
+  "tinymist.serverPath": "/absolute/path/to/typst-relay/target/release/tinymist",
   "tinymist.semanticTokens": "enable"
 }
 ```
 
-Use an absolute path. A Windows example is `C:/dev/tinymist/target/release/tinymist.exe`.
+Use an absolute path. A Windows example is `C:/dev/typst-relay/target/release/tinymist.exe`.
 
 For SSH, Tunnel, WSL, or Dev Container sessions, build on the machine running the remote extension host and put that machine’s executable path in **Remote Settings**. Workspace settings take precedence, so remove any stale workspace override.
 
@@ -80,7 +80,7 @@ The server-only output comparison preserved all 281 pages: extracted text, word 
 
 ## Development
 
-[kimpossible-TY/tinymist](https://github.com/kimpossible-TY/tinymist) is the development repository, and `main` is the integration branch. The earlier separate `tinymist-flow` repository is retained as historical storage.
+[kimpossible-TY/typst-relay](https://github.com/kimpossible-TY/typst-relay) is the development repository, and `main` is the integration branch. The earlier separate `tinymist-flow` repository is retained as historical storage.
 
 - [Developer guide](docs/dev-guide.md) — toolchain, crates, and editor tooling.
 - [Development plan](DEVELOPMENT_PLAN.md) — current priorities and investigation history.
@@ -88,7 +88,7 @@ The server-only output comparison preserved all 281 pages: extracted text, word 
 - [LSP regression harness](tests/perf/static-import-discovery/runner.py) — a reproducible static-import workload.
 - [Tinymist documentation](https://myriad-dreamin.github.io/tinymist/) — shared configuration and editor features.
 
-Set `upstream` to `https://github.com/Myriad-Dreamin/tinymist.git` when syncing shared changes. Contributions intended for the original project should start on a separate branch based on `upstream/main`.
+Set `upstream` to `https://github.com/Myriad-Dreamin/tinymist.git` when syncing shared changes. Typst Relay is developed independently while retaining its GitHub fork relationship with Tinymist.
 
 README is generated from `docs/tinymist/typst-relay.typ`. Edit that source and regenerate with `node scripts/link-docs.mjs --readme-only` after building the `typlite` binary. See [AGENTS.md](AGENTS.md) for repository conventions.
 

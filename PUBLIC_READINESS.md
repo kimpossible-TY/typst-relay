@@ -1,6 +1,6 @@
 # Historical publication review — Flow
 
-Historical snapshot of the former `tinymist-flow` repository, reviewed on 2026-09-19. Current development uses `kimpossible-TY/tinymist` on `main`; the visibility and workflow observations below describe the former repository only.
+Historical snapshot of the former `tinymist-flow` repository, reviewed on 2026-09-19. Current development uses `kimpossible-TY/typst-relay` on `main`; the visibility and workflow observations below describe the former repository only.
 
 Reviewed on 2026-09-19. **Suitable for publication as an experimental source fork, with the limits below. Visibility remains private.** This is not a production-readiness certification or an exhaustive audit of inherited upstream history.
 
